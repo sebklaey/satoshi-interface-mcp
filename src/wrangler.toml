@@ -1,0 +1,21 @@
+name = "bsl-tracker"
+main = "index.js"
+compatibility_date = "2026-11-17"
+
+routes = [
+  { pattern = "satoshi-interface.com/*", zone_name = "satoshi-interface.com" },
+  { pattern = "www.satoshi-interface.com/*", zone_name = "satoshi-interface.com" },
+  { pattern = "openos.space/*", zone_name = "openos.space" },
+  { pattern = "www.openos.space/*", zone_name = "openos.space" },
+]
+
+[[d1_databases]]
+binding = "bsl_stats"
+database_name = "bsl-stats"
+database_id = "dc63f7e0-28d9-4ea8-abb4-fb4870809e6b"
+
+[ai]
+binding = "AI"
+
+[triggers]
+crons = ["*/15 * * * *"]
