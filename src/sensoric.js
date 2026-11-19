@@ -1,4 +1,4 @@
-/* BSL Human Sensoric Engine — GET-Seite (lesende Wahrnehmung)
+/* EDNA-1 Human Proof — GET-Seite (lesende Wahrnehmung)
    Gemeinsames Modul: vom Worker (/api/sensoric.json) UND vom MCP-Server
    (Tool "feel") genutzt — damit AIs ohne Web-Abruf fühlen können. */
 
@@ -41,7 +41,7 @@ function sensoricHtml(title, body, extraRowsHtml = '') {
 h1{color:#c9a962;font-size:1.1rem;letter-spacing:.12em}.box{border:1px solid #c9a962;padding:16px;margin-bottom:18px;white-space:pre-wrap;word-break:break-all}
 .s{border:1px solid #4a4136;padding:12px;margin-bottom:10px;font-size:.8rem;word-break:break-all}
 pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;overflow-x:auto;font-size:.75rem;white-space:pre-wrap;word-break:break-all}</style></head>
-<body><h1>BSL HUMAN SENSORIC ENGINE — ${escH(title)}</h1>
+<body><h1>EDNA-1 · HUMAN PROOF — ${escH(title)}</h1>
 <div class="box">${escH(Object.entries(body).filter(([k]) => k !== 'sessions' && k !== 'metrics').map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join('\n'))}</div>
 ${body.metrics ? `<div class="box">METRIKEN:\n${escH(JSON.stringify(body.metrics, null, 2))}</div>` : ''}
 ${extraRowsHtml}
@@ -115,7 +115,7 @@ export async function handleSensoricGet(request, env) {
   const agg = (arr, f) => (arr.length ? Math.round(arr.reduce((s, x) => s + f(x), 0) / arr.length * 100) / 100 : 0);
   const body = {
     generatedAt: new Date().toISOString(),
-    engine: 'BSL-HSE-1.1 — BSL Human Sensoric Engine (local-first, unabhängige Implementierung)',
+    engine: 'EDNA-1 — OpenOS EDNA · Enhanced Detection & Neural Analysis (local-first, 16 gewichtete Signale)',
     liveWindowSec: 180,
     liveSessions: sessions.length,
     humanVerified: humans.length,
