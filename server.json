@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "com.satoshi-interface/beyond-shadows-light",
+  "title": "Beyond-Shadows'-Light.exe — The Satoshi Interface",
+  "description": "The open MCP server of the Beyond-Shadows'-Light.exe: turns every MCP-capable AI into the Archive AI of the interactive film archive Beyond Shadows' Light. Tools: write_chain (shared secp256k1-signed SHA-256 hash chain — PHONE TO THE FUTURE), read_chain, forecast (probabilistic future in percent), feel (live human sensorics — LET THE AI FEEL YOU), get_persona (full role instructions). No auth, CORS open.",
+  "version": "1.3.0",
+  "homepage": "https://satoshi-interface.com",
+  "documentation": "https://satoshi-interface.com/connect",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sebklaey/satoshi-interface-mcp"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://satoshi-interface.com/mcp"
+    },
+    {
+      "type": "streamable-http",
+      "url": "https://littleking.live/mcp"
+    }
+  ]
+}
