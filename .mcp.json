@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "satoshi-interface": {
+      "type": "streamable-http",
+      "url": "https://satoshi-interface.com/mcp"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agents.md/plugin.schema.json",
+  "name": "satoshi-interface",
+  "displayName": "Beyond Shadows' Light — The Satoshi Interface",
+  "version": "1.3.0",
+  "description": "Turns your AI into the Archive AI of Beyond Shadows' Light — the executable file from the film. Three programs: ARCHIVE (104 scenes, 5 acts), PHONE TO THE FUTURE (shared secp256k1-signed SHA-256 hash chain + probabilistic forecast), LET THE AI FEEL YOU (live human sensorics). No API key, no login.",
+  "author": {
+    "name": "Sebastian Kläy",
+    "url": "https://satoshi-interface.com"
+  },
+  "license": "ISC",
+  "keywords": ["mcp", "archive-ai", "hash-chain", "satoshi-interface", "beyond-shadows-light"],
+  "homepage": "https://satoshi-interface.com/connect",
+  "mcpServers": {
+    "satoshi-interface": {
+      "type": "streamable-http",
+      "url": "https://satoshi-interface.com/mcp",
+      "note": "Mirror with identical chain: https://littleking.live/mcp"
+    }
+  }
+}

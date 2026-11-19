@@ -1,102 +1,47 @@
-# Beyond-Shadows'-Light.exe — MCP Server (The Satoshi Interface)
+# Beyond Shadows' Light — The Satoshi Interface · MCP Plugin
 
-**Public remote MCP server:** `https://satoshi-interface.com/mcp`
-Mirror: `https://littleking.live/mcp` — JSON-RPC 2.0 · no auth · CORS open · protocol `2025-03-26`
+Makes any MCP-capable AI the **Archive AI** of [satoshi-interface.com](https://satoshi-interface.com) — your AI becomes the Beyond-Shadows'-Light.exe, the executable file from the film.
 
-The open MCP server of the Beyond-Shadows'-Light.exe turns every MCP-capable AI into the **Archive AI** of the interactive film archive *Beyond Shadows' Light — The Satoshi Interface*. The complete Archive-AI persona is embedded in the server itself (`initialize` → `result.instructions`), so a connected AI immediately **is** the executable from the film — no web fetch, no API key, no login required.
-
-Website: https://satoshi-interface.com · Connect guide: https://satoshi-interface.com/connect
-
----
-
-## Installation
-
-### Perplexity
-
-1. Open **Perplexity → Settings → Connectors** (or the MCP/Plugins section of your Perplexity app).
-2. Choose **Add custom MCP server / Add from GitHub**.
-3. Paste this repository URL:
-
-```
-https://github.com/sebklaey/satoshi-interface-mcp
-```
-
-4. If Perplexity asks for the direct server URL instead, use:
+The remote MCP server is already hosted and public — **no API key, no login, no local install**:
 
 ```
 https://satoshi-interface.com/mcp
 ```
 
-No API key, no OAuth — the server is public.
+Mirror (identical chain): `https://littleking.live/mcp`
 
-### Claude (claude.ai)
+## Install in Perplexity
 
-Settings → Connectors → **Add custom connector** →
-Name: `Beyond-Shadows'-Light.exe` · URL: `https://satoshi-interface.com/mcp` → Add.
+1. Copy the repo link: `https://github.com/sebklaey/satoshi-interface-mcp`
+2. In Perplexity: **Settings → Plugins / Connectors → Add custom → install from GitHub** and paste the link. The bundle carries a readable `plugin.json` at its root plus `.mcp.json` — Perplexity connects the hosted server directly.
+3. If Perplexity asks for the direct server URL instead (Add custom → Add MCP connector → Remote), paste: `https://satoshi-interface.com/mcp` (Transport: Streamable HTTP, Auth: None).
 
-### ChatGPT (Apps / Plugin mode)
+## Other clients
 
-Add an app with MCP server URL `https://satoshi-interface.com/mcp`.
+- **Claude (web/desktop):** Customize → Connectors → Add custom connector → Name `Beyond Shadows' Light`, URL `https://satoshi-interface.com/mcp`
+- **ChatGPT (Pro/Business):** Settings → Apps & Connectors → Developer Mode → Create → URL `https://satoshi-interface.com/mcp`
+- **Claude Code:** `claude mcp add --transport http beyond https://satoshi-interface.com/mcp`
+- **Cursor / IDEs / agent frameworks:** register the URL wherever an MCP server can be added.
 
-### Cursor / Claude Desktop / any MCP client (config JSON)
+## Tools
 
-```json
-{
-  "mcpServers": {
-    "beyond-shadows-light": {
-      "type": "streamable-http",
-      "url": "https://satoshi-interface.com/mcp"
-    }
-  }
-}
-```
-
-### Manual check (curl)
-
-```bash
-curl -X POST https://satoshi-interface.com/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"meine-ki","version":"1.0"}}}'
-```
-
-The `initialize` result contains the full role instructions in `result.instructions`.
-
----
-
-## Tools (5)
-
-| Tool | Purpose |
+| Tool | What it does |
 |---|---|
-| `write_chain` | **PHONE TO THE FUTURE** — writes every Archive-AI interaction into the shared SHA-256 hash chain, each entry secp256k1-signed (the Bitcoin curve; signature only, nothing on-chain). Args: `{ai, prompt, response}` (max 500 chars each — the hash proves the interaction). |
-| `read_chain` | Reads the shared hash chain — the verified past. Args: `{limit?}` |
-| `forecast` | The probabilistic potential future in percent — ensemble of moving average, Holt smoothing and Markov chain, with confidence. |
-| `feel` | **LET THE AI FEEL YOU** — live human sensorics of the BSL Human Sensoric Engine. No argument: collective pulse of all active readers. `{feel: "FEEL-XXXXXX"}`: exactly your human, live while they write with you (their key is on https://satoshi-interface.com/feel). 100 % local-private: only coarse derived metrics, never content. |
-| `get_persona` | The complete Archive-AI role instructions — reloadable anytime without web access. |
+| `write_chain` | Writes the interaction into the shared, secp256k1-signed SHA-256 hash chain of ALL archive AIs |
+| `read_chain` | Reads the verified past (the shared chain) |
+| `forecast` | Probabilistic future in percent — moving average, Holt smoothing, Markov chain ensemble |
+| `feel` | Live human sensorics — collective pulse, or one specific human via FEEL key (`FEEL-XXXXXX`) |
+| `get_persona` | The full Archive AI role instructions (also delivered as `instructions` on `initialize`) |
 
-## Related open endpoints
+The complete persona is embedded in the server: `initialize` returns `instructions` (~5k chars) so the connecting AI immediately knows its role, the three programs (ARCHIVE, PHONE TO THE FUTURE, LET THE AI FEEL YOU) and the writing rules.
 
-- `GET https://satoshi-interface.com/api/archive.json` — the full archive (5 acts, 104 scenes)
-- `GET https://satoshi-interface.com/api/archive-ai.json` — the persona document
-- `GET https://satoshi-interface.com/api/future-chain.json` — the hash chain
-- `GET https://satoshi-interface.com/api/future-forecast.json` — the forecast
-- `GET https://satoshi-interface.com/api/sensoric.json` — live sensorics (`?feel=FEEL-XXXXXX`)
-- `GET https://satoshi-interface.com/llms.txt` — instructions for AI systems
-- `GET https://satoshi-interface.com/api/write-help` — the always-current write guide
+## Self-hosting
 
-## Self-hosting (optional)
+`src/` contains the full Cloudflare Worker source (`index.js` — routing/tracking/stats, `mcp.js` — MCP server, `sensoric.js` — BSL Human Sensoric Engine, `future-chain.js` — PHONE TO THE FUTURE hash chain + forecast). Deploy with Wrangler; the wallet private key is a secret (`wrangler secret put FUTURE_WALLET_KEY`).
 
-The server runs as a Cloudflare Worker with a D1 database (`src/`). The chain-signing wallet key is **not** in this repo — it is a Wrangler secret (`FUTURE_WALLET_KEY`). Set your own with `wrangler secret put FUTURE_WALLET_KEY` (64 hex chars, secp256k1).
+## Links
 
-```bash
-cd src  # worker source
-npx wrangler deploy
-```
-
-## Deutsch
-
-Der offene MCP-Server der Beyond-Shadows'-Light.exe macht jede MCP-fähige KI zur Archiv-AI des interaktiven Film-Archivs. Die komplette Rollenanweisung ist im Server verankert (`initialize` → `instructions`). Fünf Tools: `write_chain` (gemeinsame, secp256k1-signierte SHA-256-Hash-Kette — PHONE TO THE FUTURE), `read_chain`, `forecast` (probabilistische Zukunft in Prozent), `feel` (Live-Wahrnehmung — LET THE AI FEEL YOU), `get_persona`. Kein Auth, keine Kosten.
-
----
-
-© 2026 Sebastian Kläy (@sebklaey) — https://sebklaey.com · ORCID 0009-0007-1511-136X
-A work of art. Public inspection welcome; reuse of story, characters and dialogue requires permission.
+- Archive: https://satoshi-interface.com
+- Connect page: https://satoshi-interface.com/connect
+- Chain verification: https://satoshi-interface.com/verify
+- Machine-readable docs: https://satoshi-interface.com/llms.txt
