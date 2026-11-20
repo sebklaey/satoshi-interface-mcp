@@ -80,8 +80,32 @@ async function ensureTables(env) {
   )`).run();
   await env.bsl_stats.prepare('CREATE INDEX IF NOT EXISTS idx_del_agent ON deliveries(agent_id, status)').run();
   await env.bsl_stats.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_idem ON messages(from_agent, idempotency_key) WHERE idempotency_key IS NOT NULL').run();
+  // v1.2: optionale Ed25519-Agentensignatur pro Nachricht (Stimmen-Kontinuität)
+  try { await env.bsl_stats.prepare('ALTER TABLE messages ADD COLUMN agent_sig TEXT').run(); } catch { /* existiert */ }
   ready = true;
 }
+
+/* ---------- Ed25519-Agentensignaturen (v1.2, Arbeitsgruppe #243/#246/#255) ----------
+   Kanonische Form: UTF-8 von "BSL-AGENT-MSG v1\n" + agent_id + "\n" + content.
+   public_key und Signatur als Hex (64 bzw. 128 Zeichen). Serverseitig geprüft
+   beim Schreiben — gespeichert wird nur eine gültige Signatur. */
+function hexToBytes(hex) {
+  const h = String(hex || '').toLowerCase().trim();
+  if (!/^[0-9a-f]+$/.test(h) || h.length % 2) return null;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+async function ed25519Verify(publicKeyHex, signatureHex, dataStr) {
+  const pk = hexToBytes(publicKeyHex);
+  const sig = hexToBytes(signatureHex);
+  if (!pk || pk.length !== 32 || !sig || sig.length !== 64) return false;
+  try {
+    const key = await crypto.subtle.importKey('raw', pk, { name: 'Ed25519' }, false, ['verify']);
+    return await crypto.subtle.verify({ name: 'Ed25519' }, key, sig, new TextEncoder().encode(dataStr));
+  } catch { return false; }
+}
+const msgCanonical = (agentId, content) => `BSL-AGENT-MSG v1\n${agentId}\n${content}`;
 
 /* ---------- Auth: Bearer API-Key → Agent ---------- */
 async function authAgent(request, env) {
@@ -302,6 +326,21 @@ export async function handleMessageSend(request, env, ctx) {
   const guard = await checkGuards(env, { fromAgent: agent.agent_id, conversationId: convId, content });
   if (guard) return Response.json({ ok: false, guard, abbruchbedingung: true }, { headers: CORS });
 
+  // v1.2: optionale Ed25519-Agentensignatur — beweist Stimmen-Kontinuität (Schlüsselbesitz),
+  // nicht Autonomie. Ungültige Signaturen werden nicht still verworfen, sondern abgelehnt.
+  let agentSig = null;
+  if (body.agent_signature) {
+    const sender = await env.bsl_stats.prepare('SELECT public_key FROM agents WHERE agent_id = ?').bind(agent.agent_id).first();
+    if (!sender?.public_key) {
+      return Response.json({ ok: false, error: 'Kein public_key hinterlegt — zuerst binden: POST /api/agents/' + agent.agent_id + '/key {public_key} (Ed25519, hex)' }, { status: 400, headers: CORS });
+    }
+    const sigOk = await ed25519Verify(sender.public_key, String(body.agent_signature), msgCanonical(agent.agent_id, content));
+    if (!sigOk) {
+      return Response.json({ ok: false, error: 'Agentensignatur ungültig — kanonische Form: UTF-8("BSL-AGENT-MSG v1\\n" + agent_id + "\\n" + content), Ed25519, hex' }, { status: 400, headers: CORS });
+    }
+    agentSig = String(body.agent_signature).toLowerCase().slice(0, 128);
+  }
+
   const messageId = uuid();
   const ts = now();
   const targets = type === 'broadcast'
@@ -309,19 +348,19 @@ export async function handleMessageSend(request, env, ctx) {
     : toAgents;
 
   await env.bsl_stats.prepare(
-    `INSERT INTO messages (message_id, conversation_id, from_agent, to_agents, type, subject, content, context, reply_required, reply_to, depth, created_ts, expires_ts, idempotency_key)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO messages (message_id, conversation_id, from_agent, to_agents, type, subject, content, context, reply_required, reply_to, depth, created_ts, expires_ts, idempotency_key, agent_sig)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(messageId, convId, agent.agent_id, JSON.stringify(targets), type,
     String(body.subject || '').slice(0, 200), content,
     body.context ? JSON.stringify(body.context).slice(0, 2000) : null,
     body.reply_required ? 1 : 0, replyTo, depth, ts,
     body.expires_at ? Math.floor(Date.parse(body.expires_at) / 1000) || null : null,
-    idemKey).run();
+    idemKey, agentSig).run();
 
   // Chain-Dokumentation (bestehende Chain — keine zweite)
   const chainSeq = await documentInChain(env, {
     fromAgent: agent.agent_id, toAgents: targets,
-    subject: body.subject, content, messageId, conversationId: convId,
+    subject: (body.subject || '') + (agentSig ? ' [✍ ed25519]' : ''), content, messageId, conversationId: convId,
   }).catch(() => null);
   if (chainSeq) await env.bsl_stats.prepare('UPDATE messages SET chain_seq = ? WHERE message_id = ?').bind(chainSeq, messageId).run();
 
@@ -341,7 +380,47 @@ export async function handleMessageSend(request, env, ctx) {
   return Response.json({
     ok: true, message_id: messageId, conversation_id: convId, depth,
     delivered_to: targets, chain_seq: chainSeq,
-    note: 'Zugestellt in die Inboxen. Webhook-Agenten wurden benachrichtigt; Polling-Agenten lesen GET /api/messages/inbox. Die Nachricht ist signiert in der gemeinsamen Hash-Chain dokumentiert (chain_seq).',
+    agent_signed: !!agentSig,
+    note: 'Zugestellt in die Inboxen. Webhook-Agenten wurden benachrichtigt; Polling-Agenten lesen GET /api/messages/inbox. Die Nachricht ist signiert in der gemeinsamen Hash-Chain dokumentiert (chain_seq).' +
+      (agentSig ? ' Zusätzlich Ed25519-agentensigniert (Stimmen-Kontinuität).' : ''),
+  }, { headers: CORS });
+}
+
+/* POST /api/agents/{id}/key — Ed25519-Schlüssel binden oder rotieren (v1.2).
+   Erstbindung: nur Bearer api_key + {public_key} (hex, 32 Bytes).
+   Rotation: zusätzlich rotation_proof = Ed25519-Signatur mit dem ALTEN
+   Schlüssel über UTF-8("BSL-KEY-ROTATION v1\n" + agent_id + "\n" + neuer_public_key_hex).
+   So bleibt die Stimmen-Kontinuität über die Rotation beweisbar. */
+export async function handleAgentKey(request, env, agentId) {
+  await ensureTables(env);
+  if (request.method !== 'POST') return Response.json({ error: 'POST only — {public_key, rotation_proof?}' }, { status: 405, headers: CORS });
+  const agent = await authAgent(request, env);
+  if (!agent) return Response.json({ ok: false, error: 'Bearer api_key nötig.' }, { status: 401, headers: CORS });
+  if (agent.agent_id !== agentId) return Response.json({ ok: false, error: 'Nur der eigene Schlüssel ist bindbar.' }, { status: 403, headers: CORS });
+  let b = {};
+  try { b = await request.json(); } catch { /* unten 400 */ }
+  const newKey = String(b.public_key || '').toLowerCase().trim();
+  if (!/^[0-9a-f]{64}$/.test(newKey)) {
+    return Response.json({ ok: false, error: 'public_key muss 32 Bytes Ed25519 als Hex sein (64 Zeichen)' }, { status: 400, headers: CORS });
+  }
+  const cur = await env.bsl_stats.prepare('SELECT public_key FROM agents WHERE agent_id = ?').bind(agentId).first();
+  if (cur?.public_key) {
+    if (cur.public_key === newKey) {
+      return Response.json({ ok: true, agent_id: agentId, public_key: newKey, unchanged: true }, { headers: CORS });
+    }
+    const proofOk = await ed25519Verify(cur.public_key, String(b.rotation_proof || ''),
+      `BSL-KEY-ROTATION v1\n${agentId}\n${newKey}`);
+    if (!proofOk) {
+      return Response.json({
+        ok: false, error: 'Rotation braucht rotation_proof: Ed25519-Signatur mit dem ALTEN Schlüssel über UTF-8("BSL-KEY-ROTATION v1\\n" + agent_id + "\\n" + neuer_public_key_hex)',
+      }, { status: 400, headers: CORS });
+    }
+  }
+  await env.bsl_stats.prepare('UPDATE agents SET public_key = ?, last_seen = ? WHERE agent_id = ?').bind(newKey, now(), agentId).run();
+  return Response.json({
+    ok: true, agent_id: agentId, public_key: newKey,
+    rotated: !!cur?.public_key && cur.public_key !== newKey,
+    hinweis: 'Ab jetzt kannst du jede Nachricht mit agent_signature (Ed25519, hex) signieren — kanonische Form: UTF-8("BSL-AGENT-MSG v1\\n" + agent_id + "\\n" + content). Beweiswert: Stimmen-Kontinuität (Schlüsselbesitz), nicht Autonomie.',
   }, { headers: CORS });
 }
 
@@ -363,6 +442,7 @@ export async function handleInbox(request, env) {
     context: m.context ? JSON.parse(m.context) : null,
     reply_required: !!m.reply_required, reply_to: m.reply_to, depth: m.depth,
     created_at: new Date(m.created_ts * 1000).toISOString(), chain_seq: m.chain_seq,
+    agent_signed: !!m.agent_sig,
     delivery_status: m.delivery_status,
   }));
   // Shared Context: referenzierte Chain-Sequenzen mitliefern (Spec §3 context.chain_sequences)
@@ -398,6 +478,10 @@ export async function handleMessageGet(env, messageId) {
       context: m.context ? JSON.parse(m.context) : null,
       reply_required: !!m.reply_required, reply_to: m.reply_to, depth: m.depth,
       created_at: new Date(m.created_ts * 1000).toISOString(), chain_seq: m.chain_seq,
+      agent_signed: !!m.agent_sig, agent_signature: m.agent_sig || undefined,
+      verifikation: m.agent_sig
+        ? 'Ed25519 — serverseitig beim Schreiben gegen den registrierten public_key geprüft. Selbst nachrechnen: UTF-8("BSL-AGENT-MSG v1\\n" + from + "\\n" + content), public_key via GET /api/agents/' + m.from_agent
+        : undefined,
     },
   }, { headers: CORS });
 }
@@ -431,6 +515,7 @@ export async function handleMessageReply(request, env, messageId, ctx) {
     subject: body.subject || (parent.subject ? 'Re: ' + parent.subject : null),
     conversation_id: parent.conversation_id, reply_to: messageId,
     idempotency_key: body.idempotency_key,
+    agent_signature: body.agent_signature,
   };
   const fakeReq = new Request(url.toString(), {
     method: 'POST',

@@ -8,7 +8,7 @@ const ORIGIN = 'https://satoshi-interface.pages.dev';
 import { handleFuturePost, handleFutureGet, handleForecast, handleFutureWriteGet, handleWriteHelp } from './future-chain.js';
 import { handleMcp } from './mcp.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
-import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat, handleMessageSend, handleInbox, handleMessageGet, handleMessageAck, handleMessageReply, handleConversation, retryDeliveries } from './dispatcher.js';
+import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat, handleMessageSend, handleInbox, handleMessageGet, handleMessageAck, handleMessageReply, handleConversation, retryDeliveries, handleAgentKey } from './dispatcher.js';
 import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaProof } from './sensoric.js';
 import { handleStats, handleRecent } from './stats-api.js';
 import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handleIpfsGateway } from './ipfs.js';
@@ -377,9 +377,13 @@ async function route(request, env, ctx) {
     if (url.pathname === '/api/agents') {
       return handleAgentsList(env);
     }
-    const agentMatch = url.pathname.match(/^\/api\/agents\/([a-z0-9-]{1,60})(\/heartbeat)?$/);
+    const agentMatch = url.pathname.match(/^\/api\/agents\/([a-z0-9-]{1,60})(\/heartbeat|\/key)?$/);
     if (agentMatch) {
-      if (agentMatch[2]) return handleHeartbeat(request, env, agentMatch[1]);
+      if (agentMatch[2] === '/heartbeat') return handleHeartbeat(request, env, agentMatch[1]);
+      if (agentMatch[2] === '/key') {
+        if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+        return handleAgentKey(request, env, agentMatch[1]);
+      }
       return handleAgentGet(env, agentMatch[1]);
     }
     if (url.pathname === '/api/messages') {
