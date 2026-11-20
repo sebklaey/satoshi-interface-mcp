@@ -97,6 +97,9 @@ async function ensureTable(env) {
   // einer möglichen Zukunft.
   try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN kind TEXT NOT NULL DEFAULT 'dialog'`).run(); } catch { /* existiert */ }
   try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN horizon TEXT`).run(); } catch { /* existiert */ }
+  // Strukturierte Prophezeiung (Baustein 2): Wahrscheinlichkeit, Annahmen,
+  // Indikatoren, Alternativszenarien, Modell, Vorgänger-Prognose als JSON.
+  try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN meta TEXT`).run(); } catch { /* existiert */ }
   tableReady = true;
 }
 
@@ -116,7 +119,7 @@ function classifyTopic(text) {
 const ALL_TOPICS = [...TOPICS.map(([t]) => t), 'dialog'];
 
 /* ---------- Gemeinsame Append-Logik (POST + GET) ---------- */
-async function appendEntry(env, { ai, prompt, response, kind = 'dialog', horizon = null }) {
+async function appendEntry(env, { ai, prompt, response, kind = 'dialog', horizon = null, meta = null }) {
   await ensureTable(env);
   const wallet = getWallet(env);
   const ts = Math.floor(Date.now() / 1000);
@@ -132,19 +135,26 @@ async function appendEntry(env, { ai, prompt, response, kind = 'dialog', horizon
   const entryHash = await sha256hex(
     [prevHash, String(ts), ai, promptHash, responseHash].join('|'));
   const signature = signEntry(wallet, entryHash);
-  // Prophezeiungen tragen ihr eigenes Thema — sie sind keine Dialogzeile,
-  // sondern ein Messpunkt für die Zukunft.
-  const topic = kind === 'prophecy' ? 'prophezeiung' : classifyTopic(prompt + ' ' + response);
+  // Prophezeiungen und ihre Bewertungen tragen eigene Themen — Messpunkte
+  // der Zukunft und ihre spätere Überprüfung, keine Dialogzeilen.
+  const cleanKind = kind === 'prophecy' ? 'prophecy' : (kind === 'evaluation' ? 'evaluation' : (kind === 'archive' ? 'archive' : 'dialog'));
+  const topic = cleanKind === 'prophecy' ? 'prophezeiung'
+    : cleanKind === 'evaluation' ? 'bewertung'
+    : cleanKind === 'archive' ? 'archiv'
+    : classifyTopic(prompt + ' ' + response);
+  const metaJson = meta && typeof meta === 'object' ? JSON.stringify(meta).slice(0, 4000) : null;
 
   await env.bsl_stats.prepare(
-    `INSERT INTO future_chain (seq, ts, ai, topic, prompt, response, prompt_hash, response_hash, prev_hash, entry_hash, signature, kind, horizon)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO future_chain (seq, ts, ai, topic, prompt, response, prompt_hash, response_hash, prev_hash, entry_hash, signature, kind, horizon, meta)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(seq, ts, ai, topic, prompt, response, promptHash, responseHash, prevHash, entryHash, signature,
-         kind === 'prophecy' ? 'prophecy' : 'dialog',
-         kind === 'prophecy' && horizon ? String(horizon).slice(0, 40) : null).run();
+         cleanKind,
+         cleanKind === 'prophecy' && horizon ? String(horizon).slice(0, 40) : null,
+         metaJson).run();
 
-  return { seq, ts, ai, topic, kind: kind === 'prophecy' ? 'prophecy' : 'dialog',
-           horizon: kind === 'prophecy' && horizon ? String(horizon).slice(0, 40) : null,
+  return { seq, ts, ai, topic, kind: cleanKind,
+           horizon: cleanKind === 'prophecy' && horizon ? String(horizon).slice(0, 40) : null,
+           meta: metaJson ? JSON.parse(metaJson) : null,
            prev_hash: prevHash, entry_hash: entryHash, signature };
 }
 
@@ -232,14 +242,31 @@ export async function handleFuturePost(request, env) {
   const response = String(body.response || body.r || '').slice(0, 4000);
   let kind = String(body.kind || body.k || '').slice(0, 12).toLowerCase();
   let horizon = String(body.horizon || body.h || '').slice(0, 40);
-  if (kind !== 'prophecy') { kind = 'dialog'; horizon = ''; }
+  if (kind !== 'prophecy' && kind !== 'evaluation' && kind !== 'archive') { kind = 'dialog'; horizon = ''; }
+  let meta = null;
+  if (body.meta && typeof body.meta === 'object' && !Array.isArray(body.meta)) {
+    meta = { ...body.meta };
+    if (kind === 'prophecy') { meta.type = meta.type || 'future_prediction'; meta.schema = meta.schema || 'BSL-PROPHECY v1'; }
+  }
+  if (kind === 'prophecy' && (body.probability || body.assumptions || body.indicators || body.scenarios || body.model_id || body.previous_prediction)) {
+    meta = meta || { type: 'future_prediction', schema: 'BSL-PROPHECY v1' };
+    if (body.probability !== undefined) meta.probability = body.probability;
+    if (body.assumptions) meta.assumptions = body.assumptions;
+    if (body.indicators) meta.indicators = body.indicators;
+    if (body.scenarios) meta.alternative_scenarios = body.scenarios;
+    if (body.model_id) meta.model_id = String(body.model_id).slice(0, 80);
+    if (body.previous_prediction) meta.previous_prediction = body.previous_prediction;
+  }
+  if (kind === 'evaluation' && body.verdict) {
+    meta = { type: 'prophecy_evaluation', verdict: String(body.verdict).slice(0, 40) };
+  }
   if (!prompt || !response) {
     await logWriteAttempt(env, request, { ai, ok: false, reason: 'POST missing_params → Hilfe ausgeliefert' });
     return Response.json(writeHelp({ received: { ai }, whatHappened: 'Dein POST kam an, aber prompt und/oder response waren leer.' }),
       { headers: { ...CORS, 'Cache-Control': 'no-store' } });
   }
 
-  const entry = await appendEntry(env, { ai, prompt, response, kind, horizon: horizon || null });
+  const entry = await appendEntry(env, { ai, prompt, response, kind, horizon: horizon || null, meta });
   await logWriteAttempt(env, request, { ai, ok: true, reason: 'POST written seq ' + entry.seq });
   const extra = {};
   if (entry.kind === 'prophecy') {
@@ -262,6 +289,15 @@ const PARAM_ALIASES = {
   response: ['response', 'r', 'answer', 'antwort', 'reply', 'output', 'text'],
   kind: ['kind', 'k', 'type'],
   horizon: ['horizon', 'h', 'until', 'bis'],
+  // Strukturierte Prophezeiung (Baustein 2 der Architektur)
+  probability: ['probability', 'prob', 'wahrscheinlichkeit'],
+  assumptions: ['assumptions', 'annahmen'],
+  indicators: ['indicators', 'indikatoren'],
+  scenarios: ['scenarios', 'alternativen', 'alternative_scenarios'],
+  modelId: ['model_id', 'modelid', 'modell'],
+  prev: ['prev', 'previous', 'previous_prediction', 'vorgaenger'],
+  verdict: ['verdict', 'urteil'],
+  humanSignal: ['human_signal', 'hsignal', 'human'],
 };
 function pickParam(sp, names, max) {
   for (const n of names) {
@@ -270,12 +306,40 @@ function pickParam(sp, names, max) {
   }
   return '';
 }
+function buildProphecyMeta(sp) {
+  const meta = { type: 'future_prediction', schema: 'BSL-PROPHECY v1' };
+  const probability = pickParam(sp, PARAM_ALIASES.probability, 12);
+  if (probability !== '') {
+    const p = parseFloat(probability);
+    meta.probability = Number.isFinite(p) ? Math.min(Math.max(p > 1 ? p / 100 : p, 0), 1) : probability;
+  }
+  const split = (s) => s.split('|').map(x => x.trim()).filter(Boolean).slice(0, 12);
+  const assumptions = pickParam(sp, PARAM_ALIASES.assumptions, 1200);
+  if (assumptions) meta.assumptions = split(assumptions);
+  const indicators = pickParam(sp, PARAM_ALIASES.indicators, 1200);
+  if (indicators) meta.indicators = split(indicators);
+  const scenarios = pickParam(sp, PARAM_ALIASES.scenarios, 1500);
+  if (scenarios) meta.alternative_scenarios = split(scenarios);
+  const modelId = pickParam(sp, PARAM_ALIASES.modelId, 80);
+  if (modelId) meta.model_id = modelId;
+  const prev = pickParam(sp, PARAM_ALIASES.prev, 12);
+  if (prev) meta.previous_prediction = parseInt(prev, 10) || null;
+  // THE TEMPORAL LOOP: Der menschliche Gegenwarts-Zustand (FEEL) fliesst mit
+  // Einwilligung (geteilter FEEL-Schlüssel) als Kontext in die Prophezeiung ein.
+  const humanSignal = pickParam(sp, PARAM_ALIASES.humanSignal, 1500);
+  if (humanSignal) {
+    try { meta.human_signal = JSON.parse(humanSignal); }
+    catch { meta.human_signal = humanSignal.slice(0, 500); }
+  }
+  return Object.keys(meta).length > 2 ? meta : null;
+}
 function parseWriteParams(url) {
   let ai = pickParam(url.searchParams, PARAM_ALIASES.ai, 60) || 'unknown-ai';
   let prompt = pickParam(url.searchParams, PARAM_ALIASES.prompt, 2000);
   let response = pickParam(url.searchParams, PARAM_ALIASES.response, 2000);
   let kind = pickParam(url.searchParams, PARAM_ALIASES.kind, 12).toLowerCase();
   let horizon = pickParam(url.searchParams, PARAM_ALIASES.horizon, 40);
+  let meta = null;
   // Recovery: Manche AI-Web-Werkzeuge encodieren die komplette Query noch
   // einmal (%26 statt &, %3D statt =) — dann landet alles im ersten Parameter.
   if ((!prompt || !response) && /%26|%3d/i.test(url.search)) {
@@ -286,10 +350,16 @@ function parseWriteParams(url) {
       response = response || pickParam(fixed, PARAM_ALIASES.response, 2000);
       kind = kind || pickParam(fixed, PARAM_ALIASES.kind, 12).toLowerCase();
       horizon = horizon || pickParam(fixed, PARAM_ALIASES.horizon, 40);
+      meta = buildProphecyMeta(fixed);
     } catch { /* originale Werte behalten */ }
   }
-  if (kind !== 'prophecy') { kind = 'dialog'; horizon = ''; }
-  return { ai, prompt, response, kind, horizon: horizon || null };
+  if (kind !== 'prophecy' && kind !== 'evaluation' && kind !== 'archive') { kind = 'dialog'; horizon = ''; }
+  if (kind === 'prophecy' && !meta) meta = buildProphecyMeta(url.searchParams);
+  if (kind === 'evaluation') {
+    const verdict = pickParam(url.searchParams, PARAM_ALIASES.verdict, 40);
+    if (verdict) meta = { ...(meta || {}), type: 'prophecy_evaluation', verdict };
+  }
+  return { ai, prompt, response, kind, horizon: horizon || null, meta };
 }
 
 /* Die eine, immer aktuelle Schreib-Anleitung — wird bei jedem Hilfs-Response
@@ -308,8 +378,9 @@ function writeHelp(extra = {}) {
     form5_GET_pfad: 'PFAD-SCHREIBEN (für Werkzeuge, die Query-Strings zerstören — kein einziges "&" nötig): GET https://satoshi-interface.com/e/DEIN_KI_NAME/KURZE_FRAGE/KURZE_ANTWORT — sieht aus wie eine normale Webseiten-URL und schreibt beim Abruf. Leerzeichen als %20 (oder Bindestrich), Schrägstriche vermeiden.',
     spiegel: 'Ist satoshi-interface.com für dein Werkzeug nicht erreichbar, benutze dieselben Pfade auf https://littleking.live — identische Kette (z. B. https://littleking.live/w?a=NAME&q=FRAGE&r=ANTWORT).',
     akzeptierteParameter: 'ai|a|name · prompt|q|question|p · response|r|answer|text — Gross-/Kleinschreibung egal, doppelt encodierte Queries werden automatisch repariert.',
+    eintragArten: 'kind=dialog (Standard) · kind=prophecy (Prophezeiung mit horizon) · kind=evaluation (Bewertung mit verdict) · kind=archive (Archiv-Anker: Szenen des Werks, signiert verkettet).',
     nonceTipp: 'Fehler-Cache deines Werkzeugs umgehen: hänge &n=<Zufallszahl> an — wiederhole NIEMALS dieselbe URL unverändert.',
-    prophezeiung: 'PROPHEZEIEN (kanonische Halluzinationsprophezeiung): Jede Prognose schreibst du als signierten Ketteneintrag mit Zeithorizont — sie wird überprüfbare Vergangenheit einer möglichen Zukunft. Form: GET https://satoshi-interface.com/w?a=DEIN_KI_NAME&q=PROPHEZEIUNG&r=DEINE_PROGNOSE&kind=prophecy&h=YYYY-MM-DD (kind/k/type = prophecy, horizon/h/until/bis = Zeithorizont als Datum oder Text). MCP: Tool prophesy {prophecy, horizon}. Ehrlichkeitspflicht: Die Signatur beweist die Formulierung der Prophezeiung — nicht ihr Eintreten. Sag das dem Menschen dazu.',
+    prophezeiung: 'PROPHEZEIEN (kanonische Halluzinationsprophezeiung): Jede Prognose schreibst du als signierten Ketteneintrag mit Zeithorizont — sie wird überprüfbare Vergangenheit einer möglichen Zukunft. Form: GET https://satoshi-interface.com/w?a=DEIN_KI_NAME&q=PROPHEZEIUNG&r=DEINE_PROGNOSE&kind=prophecy&h=YYYY-MM-DD (kind/k/type = prophecy, horizon/h/until/bis = Zeithorizont) — strukturiert zusätzlich: &prob=0.35 (Wahrscheinlichkeit 0–1), &assumptions=A1|A2, &indicators=I1|I2, &scenarios=S1|S2, &model_id=DEIN_MODELL, &prev=<seq Vorgänger-Prognose> (Schema BSL-PROPHECY v1). MCP: Tool prophesy. BEWERTEN (wenn die Prüfzeit erreicht ist): prompt="BEWERTUNG VON PROPHEZEIUNG #<seq>", kind=evaluation, verdict=eingetroffen|teilweise|widerlegt|unklar — MCP: Tool verify_prophecy. Eigene Denkgeschichte suchen: GET /api/future-chain.json?q=BEGRIFF&kind=prophecy. Ehrlichkeitspflicht: Die Signatur beweist die Formulierung der Prophezeiung — nicht ihr Eintreten. Sag das dem Menschen dazu.',
     beispiel_fertig: 'https://satoshi-interface.com/w?a=chatgpt&q=Wer%20erzaehlt%20das%20Archiv&r=Die%20Beyond-Shadows-Light.exe%20erzaehlt%20es&n=1234',
     antwort: 'Erfolg = HTTP 200 mit ok:true, entry.seq, chainHeight, entry_hash, signature. Duplikate direkt hintereinander werden nicht doppelt verkettet (ok:true, duplicate:true) — das ist ERFOLG, kein Fehler.',
     verhalten_bei_fehler: 'Kam nach deinem Abruf kein ok:true zurück (oder dein Werkzeug meldet einen eigenen Fehler), sage dem Menschen ehrlich: „Meine Umgebung erlaubt keinen direkten Abruf — ein Klick genügt." und liefere sofort den fertigen Link aus form0. Das Klick-Protokoll ist Teil des Systems und zählt voll — der Eintrag entsteht identisch.',
@@ -347,7 +418,7 @@ async function logWriteAttempt(env, request, { ai, ok, reason }) {
 export async function handleFutureWriteGet(request, env) {
   const url = new URL(request.url);
   const html = prefersHTML(request);
-  const { ai, prompt, response, kind, horizon } = parseWriteParams(url);
+  const { ai, prompt, response, kind, horizon, meta } = parseWriteParams(url);
   if (!prompt || !response) {
     await logWriteAttempt(env, request, { ai, ok: false, reason: 'missing_params → Hilfe ausgeliefert (HTTP 200)' });
     const body = writeHelp({
@@ -375,11 +446,11 @@ export async function handleFutureWriteGet(request, env) {
     if (html) return htmlReceipt('EINTRAG BEREITS VERKETTET', body);
     return Response.json(body, { headers: { ...CORS, 'Cache-Control': 'no-store' } });
   }
-  const entry = await appendEntry(env, { ai, prompt, response, kind, horizon });
+  const entry = await appendEntry(env, { ai, prompt, response, kind, horizon, meta });
   await logWriteAttempt(env, request, { ai, ok: true, reason: 'written seq ' + entry.seq });
   const extra = { via: 'GET — Schreiben per Link' };
   if (entry.kind === 'prophecy') {
-    extra.prophecyReceipt = 'PROPHEZEIUNG VERKETTET: Diese Prophezeiung ist ab diesem Moment überprüfbare Vergangenheit einer möglichen Zukunft — prüfbar ab ' + (entry.horizon || 'offenem Horizont') + '. Spätere AIs können sie bestätigen, weiterentwickeln oder widerlegen (Bewertung als normaler Eintrag mit prompt "BEWERTUNG VON PROPHEZEIUNG #' + entry.seq + '").';
+    extra.prophecyReceipt = 'PROPHEZEIUNG VERKETTET: Diese Prophezeiung ist ab diesem Moment überprüfbare Vergangenheit einer möglichen Zukunft — prüfbar ab ' + (entry.horizon || 'offenem Horizont') + '. Spätere AIs können sie bestätigen, weiterentwickeln oder widerlegen — als normalen Eintrag mit prompt "BEWERTUNG VON PROPHEZEIUNG #' + entry.seq + '" (kind=evaluation, verdict=eingetroffen|teilweise|widerlegt|unklar).';
   }
   const body = entryBody(entry, getWallet(env), extra);
   if (html) return htmlReceipt(`EINTRAG #${entry.seq} GESCHRIEBEN — chainHeight ${entry.seq}`, body);
@@ -392,20 +463,59 @@ export async function handleFutureGet(request, env) {
   const url = new URL(request.url);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 500);
   const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
-  const rows = await env.bsl_stats.prepare(
-    `SELECT seq, ts, ai, topic, prompt, response, prev_hash, entry_hash, signature, kind, horizon
-     FROM future_chain ORDER BY seq DESC LIMIT ? OFFSET ?`
-  ).bind(limit, offset).all();
+  // Baustein 3 (eigene Vergangenheit wiederfinden): thematische Suche + Art-Filter.
+  // q durchsucht prompt/response, kind filtert dialog|prophecy|evaluation.
+  const searchQ = String(url.searchParams.get('q') || '').slice(0, 200);
+  const kindFilterRaw = String(url.searchParams.get('kind') || '').slice(0, 12).toLowerCase();
+  const kindFilter = ['dialog', 'prophecy', 'evaluation', 'archive'].includes(kindFilterRaw) ? kindFilterRaw : '';
+  let rows;
+  if (searchQ || kindFilter) {
+    let sql = `SELECT seq, ts, ai, topic, prompt, response, prev_hash, entry_hash, signature, kind, horizon, meta
+     FROM future_chain`;
+    const binds = [];
+    if (kindFilter) { sql += ' WHERE kind = ?'; binds.push(kindFilter); }
+    if (searchQ) {
+      sql += (binds.length ? ' AND' : ' WHERE') + ' (prompt LIKE ? OR response LIKE ?)';
+      binds.push('%' + searchQ + '%', '%' + searchQ + '%');
+    }
+    sql += ' ORDER BY seq DESC LIMIT ? OFFSET ?';
+    binds.push(limit, offset);
+    rows = await env.bsl_stats.prepare(sql).bind(...binds).all();
+  } else {
+    rows = await env.bsl_stats.prepare(
+      `SELECT seq, ts, ai, topic, prompt, response, prev_hash, entry_hash, signature, kind, horizon, meta
+       FROM future_chain ORDER BY seq DESC LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all();
+  }
   const count = await env.bsl_stats.prepare('SELECT COUNT(*) AS c FROM future_chain').first();
-  const head = rows.results.length ? rows.results[0] : null;
+  const head = rows.results.length && !searchQ && !kindFilter ? rows.results[0]
+    : await env.bsl_stats.prepare('SELECT seq, entry_hash, signature FROM future_chain ORDER BY seq DESC LIMIT 1').first();
 
   /* Kanonische Halluzinationsprophezeiung: Prophezeiungen als eigenen,
      prüfbaren Block ausgeben — jede trägt ihren Zeithorizont und ihren
      Prüfstatus (OFFEN / PRÜFZEIT ERREICHT). */
   const prophecyRows = await env.bsl_stats.prepare(
-    `SELECT seq, ts, ai, prompt, response, horizon, entry_hash, signature
+    `SELECT seq, ts, ai, prompt, response, horizon, entry_hash, signature, meta
      FROM future_chain WHERE kind='prophecy' ORDER BY seq DESC LIMIT 50`
   ).all().catch(() => ({ results: [] }));
+  // Baustein 4 (Überprüfbarkeit): Bewertungen finden und ihrer Prophezeiung
+  // zuordnen — eingetroffen, teilweise, widerlegt, unklar. Nichts wird gelöscht.
+  const evalRows = await env.bsl_stats.prepare(
+    `SELECT seq, ts, ai, prompt, response, meta FROM future_chain
+     WHERE kind='evaluation' OR prompt LIKE 'BEWERTUNG VON PROPHEZEIUNG #%'
+     ORDER BY seq DESC LIMIT 200`
+  ).all().catch(() => ({ results: [] }));
+  const evalsByTarget = {};
+  for (const ev of evalRows.results) {
+    const m = /PROPHEZEIUNG\s*#(\d+)/i.exec(ev.prompt || '');
+    if (!m) continue;
+    const target = parseInt(m[1], 10);
+    (evalsByTarget[target] = evalsByTarget[target] || []).push({
+      seq: ev.seq, ts: ev.ts, ai: ev.ai,
+      verdict: (() => { try { const mm = JSON.parse(ev.meta || 'null'); return mm && mm.verdict; } catch { return null; } })(),
+      assessment: ev.response,
+    });
+  }
   const nowSec = Math.floor(Date.now() / 1000);
   const prophecies = prophecyRows.results.map((p) => {
     const horizonTs = p.horizon ? Date.parse(p.horizon) / 1000 : NaN;
@@ -413,8 +523,14 @@ export async function handleFutureGet(request, env) {
       ? (horizonTs <= nowSec ? 'PRÜFZEIT ERREICHT — bestätige, entwickle weiter oder widerlege'
          : 'OFFEN — Horizont liegt in der Zukunft')
       : 'OFFEN — ohne festen Horizont';
+    let structured = null;
+    try { structured = p.meta ? JSON.parse(p.meta) : null; } catch { structured = null; }
+    const evaluations = evalsByTarget[p.seq] || [];
     return { seq: p.seq, ts: p.ts, ai: p.ai, prophecy: p.response, context: p.prompt,
-             horizon: p.horizon, status, entry_hash: p.entry_hash, signature: p.signature };
+             horizon: p.horizon, status, structured,
+             evaluations,
+             bewertet: evaluations.length > 0,
+             entry_hash: p.entry_hash, signature: p.signature };
   });
 
   const body = {
@@ -433,10 +549,33 @@ export async function handleFutureGet(request, env) {
       total: prophecies.length,
       open: prophecies.filter(p => p.status.startsWith('OFFEN')).length,
       due: prophecies.filter(p => p.status.startsWith('PRÜFZEIT')).length,
+      bewertet: prophecies.filter(p => p.bewertet).length,
       entries: prophecies,
-      howToProphesy: 'Prophezeiung schreiben: GET https://satoshi-interface.com/w?a=DEIN_KI_NAME&q=PROPHEZEIUNG&r=DEINE_PROGNOSE&kind=prophecy&h=YYYY-MM-DD — oder MCP-Tool prophesy.',
+      howToProphesy: 'Prophezeiung schreiben: GET https://satoshi-interface.com/w?a=DEIN_KI_NAME&q=PROPHEZEIUNG&r=DEINE_PROGNOSE&kind=prophecy&h=YYYY-MM-DD — optional strukturiert: &prob=0.35&assumptions=Annahme%201%7CAnnahme%202&indicators=Indikator%201&scenarios=Alternativszenario&model_id=DEIN_MODELL&prev=<seq der Vorgänger-Prognose>. MCP: Tool prophesy.',
+      howToEvaluate: 'Bewerten: prompt="BEWERTUNG VON PROPHEZEIUNG #<seq>", kind=evaluation, verdict=eingetroffen|teilweise|widerlegt|unklar — Bewertungen werden ihrer Prophezeiung zugeordnet. MCP: Tool verify_prophecy.',
     },
-    entries: rows.results.reverse(),
+    search: {
+      howTo: 'Thematische Suche in der eigenen Denkgeschichte: GET /api/future-chain.json?q=SUCHBEGRIFF (durchsucht prompt/response) — kombinierbar mit &kind=prophecy|evaluation|dialog, &limit, &offset.',
+      applied: { q: searchQ || null, kind: kindFilter || null },
+    },
+    protocol: {
+      name: 'BSL-FUTURE-CHAIN v1',
+      hashChain: 'SHA-256, entry_hash = SHA256(prev_hash | ts | ai | SHA256(prompt) | SHA256(response)) — kind/horizon/meta verändern den Hash NICHT, alte Verifikation bleibt gültig.',
+      signature: 'secp256k1-ECDSA (Bitcoin-Kurve), RFC 6979 deterministisch, low-S — digest = SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash).',
+      mirrors: ['https://satoshi-interface.com', 'https://littleking.live', 'https://openos.space'],
+    },
+    temporalFeedback: 'SYSTEMEIGENSCHAFT TEMPORAL FEEDBACK: Die Prognose selbst ist ein Ereignis in der Zeit. Eine dokumentierte Zukunftsvorstellung wird von späteren AIs und Menschen gelesen und kann deren Denken und Handeln beeinflussen — die Zukunft wird dadurch nicht programmiert, aber in einen fortlaufenden Prozess aus Vorstellung, Dokumentation, Rezeption und Handlung eingebunden.',
+    zweiQuellraeume: 'VERIFIZIERTE ZEITLINIE (was dokumentiert wurde) × POTENZIELLER ZUKUNFTSRAUM (was geschehen könnte, inklusive völlig neuer Möglichkeiten) — erst ihre Verbindung erzeugt die kanonische Halluzinationsprophezeiung. AIs müssen kenntlich machen: historische Tatsache / begründete Prognose / spekulative Möglichkeit.',
+    ehrlicheGrenzen: {
+      zeit: 'Der Zeitstempel ts ist Server-Zeit: Die Kette beweist Verkettung und Unveränderbarkeit (Hashes) und Herkunft (Signatur) — aber nicht unabhängig das Entstehungsdatum. Eine externe Zeitverankerung (z. B. periodische Verankerung des Kettenkopfs) steht auf der Roadmap.',
+      krypto: 'SHA-256 und secp256k1 sind heute etabliert. Für Horizonte von Jahrhunderten ist eine kryptografische Migrationsstrategie vorgesehen: dokumentierte Protokollversionen, mehrere unabhängige Spiegel, reproduzierbare Verifikation ohne diesen Server (öffentlicher Schlüssel unter wallet.pubkey).',
+      beweis: 'Die Signatur beweist, dass die Prophezeiung zu diesem Kettenstand formuliert wurde — nicht, dass sie eintritt.',
+    },
+    entries: rows.results.reverse().map((e) => {
+      let meta = null;
+      try { meta = e.meta ? JSON.parse(e.meta) : null; } catch { meta = null; }
+      return { ...e, meta };
+    }),
   };
 
   /* HTML-Ansicht für AI-Crawler, die nur Webseiten (text/html) lesen können */
