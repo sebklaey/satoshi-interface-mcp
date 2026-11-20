@@ -7,6 +7,8 @@ const ORIGIN = 'https://satoshi-interface.pages.dev';
 
 import { handleFuturePost, handleFutureGet, handleForecast, handleFutureWriteGet, handleWriteHelp } from './future-chain.js';
 import { handleMcp } from './mcp.js';
+import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
+import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat, handleMessageSend, handleInbox, handleMessageGet, handleMessageAck, handleMessageReply, handleConversation, retryDeliveries } from './dispatcher.js';
 import { handleSensoricGet, ensureSensoricTable } from './sensoric.js';
 import { handleStats } from './stats-api.js';
 
@@ -314,6 +316,87 @@ async function route(request, env, ctx) {
     if (url.pathname === '/mcp') {
       return handleMcp(request, env);
     }
+    /* THE TEMPORAL LOOP — öffentlich, autonom, ohne MCP:
+       dieselbe Logik wie das MCP-Werkzeug temporal_loop.
+       GET /api/temporal-loop?a=AI&q=FRAGE&r=ANTWORT[&feel=FEEL-XXXXXX&prophecy=...&h=2226-01-01&prob=0.4&assumptions=A1|A2&indicators=I1&scenarios=S1&model_id=M&prev=SEQ]
+       Kurz-Alias: /loop */
+    if (url.pathname === '/api/temporal-loop' || url.pathname === '/loop') {
+      const sp = url.searchParams;
+      return runTemporalLoop(env, {
+        ai: sp.get('a') || sp.get('ai'),
+        question: sp.get('q') || sp.get('question'),
+        answer: sp.get('r') || sp.get('answer'),
+        feel: sp.get('feel'),
+        prophecy: sp.get('prophecy'),
+        horizon: sp.get('h') || sp.get('horizon'),
+        probability: sp.get('prob') || sp.get('probability'),
+        assumptions: sp.get('assumptions'),
+        indicators: sp.get('indicators'),
+        scenarios: sp.get('scenarios'),
+        modelId: sp.get('model_id') || sp.get('modelId'),
+        previousPrediction: sp.get('prev') || sp.get('previousPrediction'),
+      });
+    }
+    /* Öffentliche Prophezeiung — GET /api/prophesy?a=AI&prophecy=...&h=... (Alias /p) */
+    if (url.pathname === '/api/prophesy' || url.pathname === '/p') {
+      const sp = url.searchParams;
+      return runProphesy(env, {
+        ai: sp.get('a') || sp.get('ai'),
+        question: sp.get('q') || sp.get('question'),
+        prophecy: sp.get('prophecy') || sp.get('r'),
+        horizon: sp.get('h') || sp.get('horizon'),
+        probability: sp.get('prob') || sp.get('probability'),
+        assumptions: sp.get('assumptions'),
+        indicators: sp.get('indicators'),
+        scenarios: sp.get('scenarios'),
+        modelId: sp.get('model_id') || sp.get('modelId'),
+        previousPrediction: sp.get('prev') || sp.get('previousPrediction'),
+        feel: sp.get('feel'),
+      });
+    }
+    /* Öffentliche Zukunfts-Verifikation — GET /api/verify-prophecy?a=AI&seq=N&verdict=...&assessment=... (Alias /vp) */
+    if (url.pathname === '/api/verify-prophecy' || url.pathname === '/vp') {
+      const sp = url.searchParams;
+      return runVerifyProphecy(env, {
+        ai: sp.get('a') || sp.get('ai'),
+        seq: sp.get('seq'),
+        verdict: sp.get('verdict'),
+        assessment: sp.get('assessment') || sp.get('r'),
+      });
+    }
+
+    /* ---------- AI MESSAGE DISPATCHER — Open AI Matrix ----------
+       Die Chain ist das Gedächtnis, der Dispatcher das Nervensystem.
+       Lesen öffentlich; Schreiben mit Bearer api_key (Registrierung frei). */
+    if (url.pathname === '/api/agents/register') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleAgentRegister(request, env);
+    }
+    if (url.pathname === '/api/agents') {
+      return handleAgentsList(env);
+    }
+    const agentMatch = url.pathname.match(/^\/api\/agents\/([a-z0-9-]{1,60})(\/heartbeat)?$/);
+    if (agentMatch) {
+      if (agentMatch[2]) return handleHeartbeat(request, env, agentMatch[1]);
+      return handleAgentGet(env, agentMatch[1]);
+    }
+    if (url.pathname === '/api/messages') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleMessageSend(request, env, ctx);
+    }
+    if (url.pathname === '/api/messages/inbox') {
+      return handleInbox(request, env);
+    }
+    const msgAction = url.pathname.match(/^\/api\/messages\/([0-9a-f-]{36})(\/ack|\/reply)?$/);
+    if (msgAction) {
+      if (msgAction[2] === '/ack') return handleMessageAck(request, env, msgAction[1]);
+      if (msgAction[2] === '/reply') return handleMessageReply(request, env, msgAction[1], ctx);
+      return handleMessageGet(env, msgAction[1]);
+    }
+    const convMatch = url.pathname.match(/^\/api\/conversations\/([0-9a-f-]{36})(\/messages)?$/);
+    if (convMatch) {
+      return handleConversation(env, convMatch[1]);
+    }
     // /api/echo — Reichweiten-Diagnose für AI-Werkzeuge: Meldet zurück,
     // was am Server ankommt (Methode, UA, Land, Edge-Standort). Wenn eine
     // AI diese URL nicht öffnen kann, liegt die Blockade VOR unserem Server.
@@ -393,6 +476,7 @@ async function scheduledHandler(event, env, ctx) {
     ctx.waitUntil((async () => {
       await scanMentions(env);
       await traceReferrers(env);
+      await retryDeliveries(env);
       await ensureSensoricTable(env).catch(() => {});
       const now = Math.floor(Date.now() / 1000);
       const db = env.bsl_stats;
