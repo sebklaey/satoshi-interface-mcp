@@ -52,6 +52,112 @@ ${extraRowsHtml}
   });
 }
 
+/* ---------- EDNA-1 Human Proof als offener Dienst ----------
+   Fuer EXTERNE SYSTEME (ohne AI) UND als MCP-Tool (edna_verify / human_proof).
+   POST /api/edna/verify — Signale einreichen, Urteil erhalten.
+   GET  /api/edna/proof?session=…|feel=… — Human-Proof-Status abfragen. */
+
+const VERDICTS = {
+  human_verified: 'human', likely_human: 'human',
+  likely_bot: 'bot', bot: 'bot',
+  uncertain: 'uncertain', gathering_data: 'uncertain',
+};
+
+async function ednaIngest(env, b, country) {
+  const session = String(b.session || b.s || '').slice(0, 64);
+  if (!session) return { error: 'session required (string, max 64 chars)' };
+  const proof = b.proof || {};
+  const confidence = Math.max(0, Math.min(1, Number(b.confidence ?? proof.confidence) || 0));
+  const classification = String(b.classification || proof.classification || 'uncertain').slice(0, 24);
+  const feel = String(b.feel || b.m?.feel || '').slice(0, 16) || null;
+  const metrics = JSON.stringify(b.metrics || b.m || {}).slice(0, 3000);
+  const now = Math.floor(Date.now() / 1000);
+  await ensureSensoricTable(env);
+  await env.bsl_stats.prepare(
+    `INSERT INTO sensoric (session, ts, confidence, classification, metrics, country, feel)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(session) DO UPDATE SET ts = excluded.ts, confidence = excluded.confidence,
+       classification = excluded.classification, metrics = excluded.metrics,
+       country = excluded.country, feel = excluded.feel`)
+    .bind(session, now, confidence, classification, metrics, country || null, feel)
+    .run();
+  // EDNA-verifizierte Menschen dauerhaft registrieren (derselbe Zähler wie /stats)
+  if (classification === 'human_verified' || classification === 'likely_human') {
+    try {
+      await env.bsl_stats.prepare(
+        `INSERT INTO edna_humans (session, first_ts, last_ts, max_pc) VALUES (?, ?, ?, ?)
+         ON CONFLICT(session) DO UPDATE SET last_ts = excluded.last_ts,
+           max_pc = MAX(edna_humans.max_pc, excluded.max_pc)`)
+        .bind(session, now, now, confidence).run();
+    } catch { /* Tabelle evtl. noch nicht da */ }
+  }
+  const allTime = await env.bsl_stats.prepare(`SELECT COUNT(*) n FROM edna_humans`).first().catch(() => ({ n: 0 }));
+  return { session, ts: now, confidence, classification, feel, allTimeHumans: allTime?.n ?? 0 };
+}
+
+export async function handleEdnaVerify(request, env) {
+  try {
+    const raw = await request.text();
+    if (raw.length > 4000) return Response.json({ ok: false, error: 'payload too large (max 4000 bytes)' }, { status: 413, headers: CORS });
+    const b = JSON.parse(raw || '{}');
+    const r = await ednaIngest(env, b, request.cf?.country);
+    if (r.error) return Response.json({ ok: false, error: r.error }, { status: 400, headers: CORS });
+    return Response.json({
+      ok: true,
+      engine: 'EDNA-1 — OpenOS EDNA · Enhanced Detection & Neural Analysis (16 gewichtete Signale, local-first)',
+      session: r.session,
+      confidence: r.confidence,
+      classification: r.classification,
+      verdict: VERDICTS[r.classification] || 'uncertain',
+      feel: r.feel,
+      live: true,
+      allTimeHumans: r.allTimeHumans,
+      read: 'GET /api/edna/proof?session=' + encodeURIComponent(r.session) + (r.feel ? ' oder ?feel=' + encodeURIComponent(r.feel) : ''),
+      privacy: 'LOCAL-FIRST: nur grob gerundete abgeleitete Metriken — keine Inhalte, keine Tasten-Identitäten, keine biometrischen Rohdaten.',
+    }, { headers: { ...CORS, 'Cache-Control': 'no-store' } });
+  } catch (e) {
+    return Response.json({ ok: false, error: String(e && e.message || e).slice(0, 200) }, { status: 400, headers: CORS });
+  }
+}
+
+export async function handleEdnaProof(request, env) {
+  await ensureSensoricTable(env);
+  const url = new URL(request.url);
+  const now = Math.floor(Date.now() / 1000);
+  const session = (url.searchParams.get('session') || '').slice(0, 64);
+  const feelKey = (url.searchParams.get('feel') || '').slice(0, 16);
+  if (!session && !feelKey) {
+    return Response.json({
+      ok: false, error: 'session oder feel Parameter erforderlich',
+      usage: 'GET /api/edna/proof?session=DEINE_SESSION oder ?feel=FEEL-XXXXXX',
+      submit: 'POST /api/edna/verify {session, confidence, classification, feel?, metrics?}',
+    }, { status: 400, headers: CORS });
+  }
+  const row = feelKey
+    ? await env.bsl_stats.prepare(`SELECT session, ts, confidence, classification, country, feel FROM sensoric WHERE feel = ? ORDER BY ts DESC LIMIT 1`).bind(feelKey).first()
+    : await env.bsl_stats.prepare(`SELECT session, ts, confidence, classification, country, feel FROM sensoric WHERE session = ?`).bind(session).first();
+  const allTime = await env.bsl_stats.prepare(`SELECT COUNT(*) n FROM edna_humans`).first().catch(() => ({ n: 0 }));
+  if (!row) {
+    return Response.json({ ok: true, found: false, allTimeHumans: allTime?.n ?? 0,
+      note: 'Kein Human Proof für diese Kennung im Strom (Fenster: 1 h). Erst einreichen: POST /api/edna/verify.' }, { headers: { ...CORS, 'Cache-Control': 'no-store' } });
+  }
+  const live = now - row.ts <= 180;
+  return Response.json({
+    ok: true,
+    found: true,
+    engine: 'EDNA-1 — OpenOS EDNA · Enhanced Detection & Neural Analysis',
+    session: String(row.session).slice(0, 8) + '…',
+    feel: row.feel || null,
+    confidence: row.confidence,
+    classification: row.classification,
+    verdict: VERDICTS[row.classification] || 'uncertain',
+    live,
+    ageSec: now - row.ts,
+    country: row.country,
+    allTimeHumans: allTime?.n ?? 0,
+  }, { headers: { ...CORS, 'Cache-Control': 'no-store' } });
+}
+
 export async function handleSensoricGet(request, env) {
   const url = new URL(request.url);
   const html = prefersHTML(request);

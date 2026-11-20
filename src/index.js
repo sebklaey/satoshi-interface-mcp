@@ -9,7 +9,7 @@ import { handleFuturePost, handleFutureGet, handleForecast, handleFutureWriteGet
 import { handleMcp } from './mcp.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat, handleMessageSend, handleInbox, handleMessageGet, handleMessageAck, handleMessageReply, handleConversation, retryDeliveries } from './dispatcher.js';
-import { handleSensoricGet, ensureSensoricTable } from './sensoric.js';
+import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaProof } from './sensoric.js';
 import { handleStats, handleRecent } from './stats-api.js';
 
 const BOT_RULES = [
@@ -456,6 +456,15 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     }
     if (url.pathname === '/api/sensoric.json') {
       return handleSensoricGet(request, env);
+    }
+    // EDNA-1 Human Proof als offener Dienst — für externe Systeme OHNE AI
+    if (url.pathname === '/api/edna/verify') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method !== 'POST') return Response.json({ error: 'POST only — {session, confidence, classification, feel?, metrics?}' }, { status: 405, headers: CORS });
+      return handleEdnaVerify(request, env);
+    }
+    if (url.pathname === '/api/edna/proof') {
+      return handleEdnaProof(request, env);
     }
 
     // Loggen (nicht-blockierend), dann an Pages durchreichen
