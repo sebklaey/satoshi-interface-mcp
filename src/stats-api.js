@@ -54,7 +54,7 @@ export async function handleStats(request, env, ctx) {
     const now = Math.floor(Date.now() / 1000);
     const dayAgo = now - 86400;
     const db = env.bsl_stats;
-    const [bots, cats24, recent, counters, mentions, referrers, hourly, liveNow, liveReading, chainWrites] = await Promise.all([
+    const [bots, cats24, recent, counters, mentions, referrers, hourly, liveNow, liveReading, chainWrites, liveProof] = await Promise.all([
       db.prepare(`SELECT bot, category, n, last FROM agg_bots ORDER BY n DESC LIMIT 30`).all(),
       db.prepare(`SELECT category, SUM(n) n FROM agg_cats_hourly WHERE h > ? GROUP BY category`)
         .bind(Math.floor(dayAgo / 3600) * 3600).all(),
@@ -69,16 +69,39 @@ export async function handleStats(request, env, ctx) {
       db.prepare(`SELECT h, n FROM agg_hourly WHERE h > ? ORDER BY h`)
         .bind(Math.floor(dayAgo / 3600) * 3600).all(),
       db.prepare(`SELECT COUNT(DISTINCT session) n FROM pings WHERE ts > ?`).bind(now - 300).first(),
-      db.prepare(`SELECT act, scene, title, country, COUNT(DISTINCT session) n, MAX(ts) last
+      db.prepare(`SELECT act, scene, title, country, COUNT(DISTINCT session) n, MAX(ts) last,
+                         MAX(pc) pc
                   FROM pings WHERE ts > ? AND title IS NOT NULL
-                  GROUP BY act, scene, title ORDER BY last DESC LIMIT 8`).bind(now - 300).all(),
+                  GROUP BY act, scene, title ORDER BY last DESC LIMIT 8`).bind(now - 300).all()
+        .catch(() => db.prepare(`SELECT act, scene, title, country, COUNT(DISTINCT session) n, MAX(ts) last, NULL pc
+                  FROM pings WHERE ts > ? AND title IS NOT NULL
+                  GROUP BY act, scene, title ORDER BY last DESC LIMIT 8`).bind(now - 300).all()),
       db.prepare(`SELECT ai, endpoint, ok, reason, ua, COUNT(*) n, MAX(ts) last
                   FROM chain_write_log WHERE ts > ?
                   GROUP BY ai, endpoint, ok, reason ORDER BY last DESC LIMIT 20`)
         .bind(dayAgo).all()
         .catch(() => ({ results: [] })), // Tabelle existiert erst ab dem ersten Schreibversuch
+      // EDNA-1-Aufschlüsselung der Live-Sessions: Mensch / Bot / ungeprüft
+      db.prepare(`SELECT pk, COUNT(DISTINCT session) n FROM pings
+                  WHERE ts > ? GROUP BY pk`).bind(now - 300).all()
+        .catch(() => ({ results: [] })),
     ]);
     const cv = Object.fromEntries((counters.results || []).map((r) => [r.key, r.value]));
+    // EDNA-1-Klassifikationen der Live-Sessions aggregieren
+    const proofBuckets = { human_verified: 0, likely_human: 0, uncertain: 0, likely_bot: 0, bot: 0, gathering_data: 0 };
+    let proofTotal = 0;
+    for (const r of liveProof.results || []) {
+      if (r.pk && r.pk in proofBuckets) { proofBuckets[r.pk] += r.n; proofTotal += r.n; }
+    }
+    const liveTotal = liveNow?.n ?? 0;
+    const edna = {
+      checked: proofTotal,
+      unchecked: Math.max(0, liveTotal - proofTotal),
+      humans: proofBuckets.human_verified + proofBuckets.likely_human,
+      bots: proofBuckets.likely_bot + proofBuckets.bot,
+      uncertain: proofBuckets.uncertain + proofBuckets.gathering_data,
+      buckets: proofBuckets,
+    };
     const body = {
       generatedAt: new Date().toISOString(),
       window: '24h',
@@ -93,7 +116,8 @@ export async function handleStats(request, env, ctx) {
       hourly: hourly.results || [],
       live: {
         windowSec: 300,
-        visitors: liveNow?.n ?? 0,
+        visitors: liveTotal,
+        edna,
         reading: liveReading.results || [],
       },
       chainWrites: {

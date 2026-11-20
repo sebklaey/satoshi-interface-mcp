@@ -186,19 +186,34 @@ async function handleSensoricPost(request, env) {
 
 
 /* /api/ping — anonymes Lese-Beacon: wer ist gerade online, welche Szene liest er.
-   Keine IPs, nur eine zufällige Session-ID pro Browser-Tab-Session. */
+   Keine IPs, nur eine zufällige Session-ID pro Browser-Tab-Session.
+   pc/pk: EDNA-1 Human Proof (confidence, classification) — unterscheidet echte
+   Menschen von headless Bots, die JavaScript ausführen. */
+let pingsMigrated = null;
+function ensurePingProofColumns(env) {
+  if (!pingsMigrated) {
+    pingsMigrated = (async () => {
+      try { await env.bsl_stats.prepare(`ALTER TABLE pings ADD COLUMN pc REAL`).run(); } catch { /* existiert */ }
+      try { await env.bsl_stats.prepare(`ALTER TABLE pings ADD COLUMN pk TEXT`).run(); } catch { /* existiert */ }
+    })();
+  }
+  return pingsMigrated;
+}
 async function handlePing(request, env) {
   try {
     const raw = await request.text();
     const b = JSON.parse(raw || '{}');
     const session = String(b.s || '').slice(0, 64) || 'anon';
     const title = b.title ? String(b.title).slice(0, 160) : null;
+    const pc = typeof b.pc === 'number' && b.pc >= 0 && b.pc <= 1 ? b.pc : null;
+    const pk = b.pk ? String(b.pk).slice(0, 24) : null;
+    await ensurePingProofColumns(env);
     await env.bsl_stats.prepare(
-      `INSERT INTO pings (ts, session, act, scene, title, country) VALUES (?, ?, ?, ?, ?, ?)`)
+      `INSERT INTO pings (ts, session, act, scene, title, country, pc, pk) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(Math.floor(Date.now() / 1000), session,
             b.act ? String(b.act).slice(0, 8) : null,
             Number.isInteger(b.n) ? b.n : null, title,
-            request.cf?.country || null)
+            request.cf?.country || null, pc, pk)
       .run();
   } catch { /* Beacon darf nie stören */ }
   return new Response(null, { status: 204, headers: CORS });
