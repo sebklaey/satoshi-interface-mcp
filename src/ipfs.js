@@ -233,3 +233,26 @@ export async function handlePinnedConfirm(request, env) {
   await env.bsl_stats.prepare('UPDATE future_chain SET ipfs_pinned = 1 WHERE seq = ?').bind(seq).run();
   return Response.json({ ok: true, seq, cid, pinned: true }, { headers: CORS });
 }
+
+/* Eigener HTTPS-Gateway: /ipfs/{cid} — liefert die exakten kanonischen Bytes
+   zu jeder bekannten CID, weltweit abrufbar, content-addressiert.
+   Ueberbrueckt die DHT-Ausbreitungszeit oeffentlicher Gateways — die
+   Verifikation bleibt identisch: Bytes → CID nachrechnen → entry_hash → Signatur. */
+export async function handleIpfsGateway(request, env, cid) {
+  try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN ipfs_cid TEXT`).run(); } catch { /* ok */ }
+  try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN ipfs_prev_cid TEXT`).run(); } catch { /* ok */ }
+  const r = await env.bsl_stats.prepare(
+    `SELECT seq, ts, ai, prompt, response, prompt_hash, response_hash, prev_hash, entry_hash, signature, ipfs_cid, ipfs_prev_cid
+     FROM future_chain WHERE ipfs_cid = ?`).bind(String(cid || '').slice(0, 100)).first();
+  if (!r) return Response.json({ ok: false, error: 'CID unbekannt — nicht Teil dieser Kette' }, { status: 404, headers: CORS });
+  const bytes = canonicalDoc(r, r.ipfs_prev_cid || null);
+  const localCid = await cidForBytes(bytes);
+  if (localCid !== r.ipfs_cid) {
+    return Response.json({ ok: false, error: 'Integritaetsbruch: Bytes ergeben nicht die gespeicherte CID' }, { status: 500, headers: CORS });
+  }
+  return new Response(bytes, {
+    headers: { ...CORS, 'Content-Type': 'application/json', 'X-IPFS-CID': r.ipfs_cid,
+               'X-IPFS-Path': `/ipfs/${r.ipfs_cid}`,
+               'Cache-Control': 'public, max-age=31536000, immutable' },
+  });
+}
