@@ -12,6 +12,7 @@ import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat,
 import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaProof } from './sensoric.js';
 import { handleStats, handleRecent } from './stats-api.js';
 import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handleIpfsGateway } from './ipfs.js';
+import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm } from './storage.js';
 
 const BOT_RULES = [
   // AI-Crawler zuerst (spezifisch vor generisch)
@@ -471,6 +472,26 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     if (url.pathname === '/api/future-chain/pinned') {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
       return handlePinnedConfirm(request, env);
+    }
+    // BSL STORAGE — freier Datenspeicher auf unserem eigenen IPFS (Kubo).
+    // Oeffentlich + gratis: Upload an Pinata (Eingang), eigener Kubo spiegelt physisch nach.
+    if (url.pathname === '/api/storage/upload') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleStorageUpload(request, env);
+    }
+    if (url.pathname === '/api/storage/list.json') {
+      return handleStorageList(env);
+    }
+    if (url.pathname === '/api/storage/unpinned.json') {
+      return handleStorageUnpinned(env);
+    }
+    if (url.pathname === '/api/storage/pinned') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleStoragePinnedConfirm(request, env);
+    }
+    const storageDl = url.pathname.match(/^\/api\/storage\/download\/([A-Za-z0-9]{20,100})\/?$/);
+    if (storageDl) {
+      return handleStorageDownload(request, env, storageDl[1]);
     }
     // EDNA-1 Human Proof als offener Dienst — für externe Systeme OHNE AI
     if (url.pathname === '/api/edna/verify') {

@@ -44,6 +44,56 @@ async function pinataPinCid(cid) {
   return (await res.json().catch(() => ({}))).ipfsHash || cid;
 }
 
+async function sha256hex(buf) {
+  const d = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* BSL STORAGE: freie Nutzer-Dateien physisch auf den eigenen Kubo spiegeln.
+   Eingang war Pinata (weltweit erreichbar) — wir holen die Bytes von dort,
+   pruefen SHA-256 (Identitaet), pinnen die CID lokal und bestaetigen. */
+async function kuboPin(cid) {
+  const res = await fetch(`${API}/api/v0/pin/add?arg=${encodeURIComponent(cid)}`, {
+    method: 'POST', signal: AbortSignal.timeout(120_000),
+  });
+  if (!res.ok) throw new Error(`kubo pin ${res.status}: ${(await res.text()).slice(0, 120)}`);
+}
+
+async function storageCycle() {
+  const listRes = await fetch(`${ORIGIN}/api/storage/unpinned.json`, { headers: { 'User-Agent': UA } });
+  if (!listRes.ok) throw new Error(`storage unpinned ${listRes.status}`);
+  const list = await listRes.json();
+  if (!list.count) return;
+  let pinned = 0;
+  for (const e of list.entries) {
+    try {
+      // 1. Bytes holen + Integritaet pruefen
+      const dl = await fetch(e.fetch, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(60_000) });
+      if (!dl.ok) { console.error(`storage ${e.cid}: fetch ${dl.status}`); continue; }
+      const bytes = await dl.arrayBuffer();
+      if (e.sha256 && (await sha256hex(bytes)) !== e.sha256) {
+        console.error(`storage ${e.cid}: SHA-256-MISMATCH — uebersprungen`);
+        continue;
+      }
+      // 2. In den eigenen Knoten legen (lokale Kopie der Bytes) + Pinata-CID pinnen
+      await kuboAdd(new Uint8Array(bytes), `bsl-storage/${e.name || e.cid}`);
+      await kuboPin(e.cid);
+      // 3. Bestaetigen
+      const conf = await fetch(`${ORIGIN}/api/storage/pinned`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
+        body: JSON.stringify({ cid: e.cid, token: TOKEN }),
+      });
+      const cj = await conf.json();
+      if (cj.ok) { pinned++; console.log(`storage gepinnt: ${e.cid} (${e.name || '?'}, ${e.size} B)`); }
+      else console.error(`storage ${e.cid}: confirm fehlgeschlagen:`, cj.error);
+    } catch (err) {
+      console.error(`storage ${e.cid}:`, err.message);
+    }
+  }
+  if (pinned) console.log(`[pin-daemon] ${pinned} Storage-Dateien physisch gepinnt`);
+}
+
 async function cycle() {
   const listRes = await fetch(`${ORIGIN}/api/future-chain/unpinned.json`, { headers: { 'User-Agent': UA } });
   if (!listRes.ok) throw new Error(`unpinned ${listRes.status}`);
@@ -84,6 +134,8 @@ async function main() {
   for (;;) {
     try { await cycle(); }
     catch (e) { console.error('[pin-daemon]', e.message); }
+    try { await storageCycle(); }
+    catch (e) { console.error('[pin-daemon storage]', e.message); }
     await new Promise((r) => setTimeout(r, 60_000));
   }
 }
