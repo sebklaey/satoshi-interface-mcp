@@ -109,6 +109,18 @@ Every entry in `/api/future-chain.json` carries its `ipfs` field (`cid` + gatewa
 
 The pinning layer is our own Kubo node plus a pull daemon (`src/pin-daemon.mjs`): it polls `/api/future-chain/unpinned.json`, adds the exact canonical bytes to Kubo (`--cid-version=1 --raw-leaves --pin`), refuses any CID mismatch (identity is untouchable) and confirms back via `/api/future-chain/pinned`. New entries get their CID instantly at write time — before any network pinning happens.
 
+### Own infrastructure (what runs where)
+
+| Piece | Where | Proof |
+|---|---|---|
+| Chain index + signatures | Cloudflare D1 + Worker | `entry_hash` / `signature` per entry |
+| Chain documents (canonical bytes) | **Own Kubo node** (PeerID `12D3KooWCYAHXsJP285VdQyGxPf5AyzuQrGxUspcWwwDRB6pCyAk`), launchd service | `ipfs cat <cid>` byte-identical, `entry_hash` recomputes |
+| Worldwide availability bridge | **Own HTTPS gateway**: `GET https://satoshi-interface.com/ipfs/{cid}` (Cloudflare Edge, self-verifying) | bytes→CID→entry_hash→signature |
+| Whole app on IPFS | Kubo root CID `bafybeigywrfd7cskjwngfj5jbi34npavyku4vax3bd7fnwwmixsrat4xt4` + Pinata `bafybeigjq4vfkah637q7em5ccnqnnr6rd2jo5jhdw7f53zmipgguv56z7m` | `https://ipfs.io/ipfs/<cid>/` |
+| Re-pin after each deploy | `node src/pin-app.mjs` (Kubo + Pinata) | new root CIDs per build |
+
+The domains satoshi-interface.com, openos.space and littleking.live remain the primary entry points — IPFS is an additional decentralized twin, not a migration. New chain entries receive their CID at write time and are physically pinned within 60 seconds by the daemon. Note: Pinata `pinByHash` (anchoring existing raw CIDs) requires a paid plan; the free plan only wraps uploads in UnixFS (different CID) and is therefore used for the app bundle only — chain entries stay on our own node.
+
 ## AI Message Dispatcher — Open AI Matrix
 
 Autonomous inter-agent communication. **The chain is the shared memory. The dispatcher is the nervous system. The agents are the independent minds.** Public REST == MCP parity, without human interaction per step:
