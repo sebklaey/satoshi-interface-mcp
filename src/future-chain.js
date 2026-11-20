@@ -19,6 +19,7 @@ import * as secp from '@noble/secp256k1';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { hmac } from '@noble/hashes/hmac.js';
 import { ripemd160 } from '@noble/hashes/legacy.js';
+import { pinEntry, ipfsGateways } from './ipfs.js';
 
 secp.hashes.sha256 = (m) => sha256(m);
 secp.hashes.hmacSha256 = (key, msg) => hmac(sha256, key, msg);
@@ -100,6 +101,10 @@ async function ensureTable(env) {
   // Strukturierte Prophezeiung (Baustein 2): Wahrscheinlichkeit, Annahmen,
   // Indikatoren, Alternativszenarien, Modell, Vorgänger-Prognose als JSON.
   try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN meta TEXT`).run(); } catch { /* existiert */ }
+  // IPFS-Spiegelschicht: CID als reine Index-Spalte — NIEMALS Teil des Hashes.
+  // Die kryptografische Identitaet (prev_hash, entry_hash, signature) bleibt
+  // bei jedem Speicherort byteidentisch.
+  try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN ipfs_cid TEXT`).run(); } catch { /* existiert */ }
   tableReady = true;
 }
 
@@ -152,10 +157,23 @@ async function appendEntry(env, { ai, prompt, response, kind = 'dialog', horizon
          cleanKind === 'prophecy' && horizon ? String(horizon).slice(0, 40) : null,
          metaJson).run();
 
+  // IPFS-Spiegelung: CID wird lokal-deterministisch aus den kanonischen Bytes
+  // bestimmt (sofort bekannt, auch ohne Pin-Dienst) und nachgetragen.
+  // Identitaet bleibt unberuehrt — die CID ist nur eine Adresse.
+  const stored = { seq, ts, ai, prompt, response, prompt_hash: promptHash, response_hash: responseHash,
+                   prev_hash: prevHash, entry_hash: entryHash, signature };
+  let ipfs = null;
+  try {
+    ipfs = await pinEntry(env, stored);
+  } catch { ipfs = { cid: null, pinned: false, reason: 'pin fehlgeschlagen — Cron-Backfill' }; }
+
   return { seq, ts, ai, topic, kind: cleanKind,
            horizon: cleanKind === 'prophecy' && horizon ? String(horizon).slice(0, 40) : null,
            meta: metaJson ? JSON.parse(metaJson) : null,
-           prev_hash: prevHash, entry_hash: entryHash, signature };
+           prev_hash: prevHash, entry_hash: entryHash, signature,
+           ipfs_cid: ipfs?.cid || null,
+           ipfs: ipfs?.cid ? { cid: ipfs.cid, pinned: ipfs.pinned, gateways: ipfsGateways(ipfs.cid),
+                               doc: `https://satoshi-interface.com/api/future-chain/ipfs.json?seq=${seq}` } : null };
 }
 
 function entryBody(entry, wallet, extra = {}) {
@@ -470,7 +488,7 @@ export async function handleFutureGet(request, env) {
   const kindFilter = ['dialog', 'prophecy', 'evaluation', 'archive'].includes(kindFilterRaw) ? kindFilterRaw : '';
   let rows;
   if (searchQ || kindFilter) {
-    let sql = `SELECT seq, ts, ai, topic, prompt, response, prev_hash, entry_hash, signature, kind, horizon, meta
+    let sql = `SELECT seq, ts, ai, topic, prompt, response, prev_hash, entry_hash, signature, kind, horizon, meta, ipfs_cid
      FROM future_chain`;
     const binds = [];
     if (kindFilter) { sql += ' WHERE kind = ?'; binds.push(kindFilter); }
@@ -483,7 +501,7 @@ export async function handleFutureGet(request, env) {
     rows = await env.bsl_stats.prepare(sql).bind(...binds).all();
   } else {
     rows = await env.bsl_stats.prepare(
-      `SELECT seq, ts, ai, topic, prompt, response, prev_hash, entry_hash, signature, kind, horizon, meta
+      `SELECT seq, ts, ai, topic, prompt, response, prev_hash, entry_hash, signature, kind, horizon, meta, ipfs_cid
        FROM future_chain ORDER BY seq DESC LIMIT ? OFFSET ?`
     ).bind(limit, offset).all();
   }
@@ -563,6 +581,7 @@ export async function handleFutureGet(request, env) {
       hashChain: 'SHA-256, entry_hash = SHA256(prev_hash | ts | ai | SHA256(prompt) | SHA256(response)) — kind/horizon/meta verändern den Hash NICHT, alte Verifikation bleibt gültig.',
       signature: 'secp256k1-ECDSA (Bitcoin-Kurve), RFC 6979 deterministisch, low-S — digest = SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash).',
       mirrors: ['https://satoshi-interface.com', 'https://littleking.live', 'https://openos.space'],
+      ipfs: 'DEZENTRALE SPIEGELSCHICHT: Jeder Eintrag liegt als kanonisches JSON-Dokument auf IPFS (CIDv1, raw, lokal-deterministisch aus den Bytes). Die kryptografische Identitaet (prev_hash, entry_hash, signature) ist byteidentisch aus der Kette uebernommen — der Speicherort aendert sie NIEMALS. Die CID ist nur eine Adresse. Dokument je Eintrag: GET /api/future-chain/ipfs.json?seq=N (enthaelt prev_cid — die ganze Kette ist auf IPFS vom Kopf bis zur Genesis durchlaufbar).',
     },
     temporalFeedback: 'SYSTEMEIGENSCHAFT TEMPORAL FEEDBACK: Die Prognose selbst ist ein Ereignis in der Zeit. Eine dokumentierte Zukunftsvorstellung wird von späteren AIs und Menschen gelesen und kann deren Denken und Handeln beeinflussen — die Zukunft wird dadurch nicht programmiert, aber in einen fortlaufenden Prozess aus Vorstellung, Dokumentation, Rezeption und Handlung eingebunden.',
     zweiQuellraeume: 'VERIFIZIERTE ZEITLINIE (was dokumentiert wurde) × POTENZIELLER ZUKUNFTSRAUM (was geschehen könnte, inklusive völlig neuer Möglichkeiten) — erst ihre Verbindung erzeugt die kanonische Halluzinationsprophezeiung. AIs müssen kenntlich machen: historische Tatsache / begründete Prognose / spekulative Möglichkeit.',
@@ -574,7 +593,11 @@ export async function handleFutureGet(request, env) {
     entries: rows.results.reverse().map((e) => {
       let meta = null;
       try { meta = e.meta ? JSON.parse(e.meta) : null; } catch { meta = null; }
-      return { ...e, meta };
+      return { ...e, meta,
+        ipfs: e.ipfs_cid ? { cid: e.ipfs_cid,
+                             gateways: [`https://ipfs.io/ipfs/${e.ipfs_cid}`, `https://dweb.link/ipfs/${e.ipfs_cid}`],
+                             doc: `https://satoshi-interface.com/api/future-chain/ipfs.json?seq=${e.seq}` }
+                         : { status: 'pending — wird vom Cron-Backfill gespiegelt' } };
     }),
   };
 
