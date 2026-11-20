@@ -41,6 +41,77 @@ export async function ensureBackfill(env) {
   ]);
 }
 
+/* LETZTE ZUGRIFFE — historisch: die requests-Tabelle wird seit Liveschaltung
+   nicht mehr geloescht (Aufbewahrung: unbegrenzt ab 2026-11-20; Rohdaten davor
+   wurden bis zu 7 Tage vorgehalten). Diese Funktion liefert die komplette
+   Zugriffsgeschichte — seitenweise, filterbar. Genutzt von /api/requests.json
+   UND vom MCP-Tool 'stats' (Argument history:true). */
+export async function handleRecent(request, env) {
+  try {
+    await ensureBackfill(env);
+    // Index auf ts sicherstellen — einmalig, danach no-op
+    try { await env.bsl_stats.prepare(`CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)`).run(); } catch { /* ok */ }
+    const u = new URL(request.url);
+    const num = (k, d, min, max) => {
+      const v = parseInt(u.searchParams.get(k) || '', 10);
+      if (Number.isNaN(v)) return d;
+      return Math.max(min, Math.min(max, v));
+    };
+    const tsParam = (k) => {
+      const raw = u.searchParams.get(k);
+      if (!raw) return null;
+      const n = parseInt(raw, 10);
+      if (!Number.isNaN(n)) return n > 1e12 ? Math.floor(n / 1000) : n; // ms oder s
+      const d = Date.parse(raw);
+      return Number.isNaN(d) ? null : Math.floor(d / 1000); // ISO-Datum
+    };
+    const limit = num('limit', 100, 1, 1000);
+    const offset = num('offset', 0, 0, 10_000_000);
+    const since = tsParam('since');
+    const until = tsParam('until');
+    const category = (u.searchParams.get('category') || '').slice(0, 40);
+    const bot = (u.searchParams.get('bot') || '').slice(0, 80);
+    const path = (u.searchParams.get('path') || '').slice(0, 120);
+
+    const where = [];
+    const binds = [];
+    if (since) { where.push('ts >= ?'); binds.push(since); }
+    if (until) { where.push('ts <= ?'); binds.push(until); }
+    if (category) { where.push('category = ?'); binds.push(category); }
+    if (bot) { where.push('bot LIKE ?'); binds.push(`%${bot}%`); }
+    if (path) { where.push('path LIKE ?'); binds.push(`%${path}%`); }
+    const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+
+    const db = env.bsl_stats;
+    const [rows, count, range] = await Promise.all([
+      db.prepare(`SELECT ts, bot, category, path, country, referer FROM requests ${whereSql}
+                  ORDER BY ts DESC LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all(),
+      db.prepare(`SELECT COUNT(*) n FROM requests ${whereSql}`).bind(...binds).first(),
+      db.prepare(`SELECT MIN(ts) first, MAX(ts) last, COUNT(*) total FROM requests`).first(),
+    ]);
+    return Response.json({
+      ok: true,
+      description: 'LETZTE ZUGRIFFE — vollstaendige Zugriffsgeschichte seit Liveschaltung (Rohdaten werden seit 2026-11-20 unbegrenzt vorgehalten; davor bis zu 7 Tage). Neueste zuerst.',
+      filters: { since, until, category: category || null, bot: bot || null, path: path || null },
+      limit, offset,
+      matched: count?.n ?? 0,
+      archiveRange: {
+        first: range?.first ? new Date(range.first * 1000).toISOString() : null,
+        last: range?.last ? new Date(range.last * 1000).toISOString() : null,
+        totalRows: range?.total ?? 0,
+      },
+      nextOffset: offset + (rows.results || []).length < (count?.n ?? 0) ? offset + limit : null,
+      requests: (rows.results || []).map((r) => ({
+        ...r,
+        iso: new Date(r.ts * 1000).toISOString(),
+      })),
+    }, { headers: { ...CORS, 'Cache-Control': 'public, max-age=15' } });
+  } catch (e) {
+    return Response.json({ error: 'recent unavailable', detail: String(e && e.message || e).slice(0, 200) },
+      { status: 503, headers: { ...CORS, 'Cache-Control': 'no-store' } });
+  }
+}
+
 export async function handleStats(request, env, ctx) {
   // Edge-Cache 30 s: die /stats-Seite pollt alle 30 s — ohne Cache würde jeder
   // Poll D1 lesen. Mit Cache: ~1 D1-Zugriff pro Minute pro Edge-Standort.

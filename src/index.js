@@ -10,7 +10,7 @@ import { handleMcp } from './mcp.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat, handleMessageSend, handleInbox, handleMessageGet, handleMessageAck, handleMessageReply, handleConversation, retryDeliveries } from './dispatcher.js';
 import { handleSensoricGet, ensureSensoricTable } from './sensoric.js';
-import { handleStats } from './stats-api.js';
+import { handleStats, handleRecent } from './stats-api.js';
 
 const BOT_RULES = [
   // AI-Crawler zuerst (spezifisch vor generisch)
@@ -431,6 +431,9 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
       return handleForecast(env);
     }
 
+    if (url.pathname === '/api/requests.json') {
+      return handleRecent(request, env);
+    }
     if (url.pathname === '/api/stats.json') {
       return handleStats(request, env, ctx);
     }
@@ -481,7 +484,8 @@ async function scheduledHandler(event, env, ctx) {
       const now = Math.floor(Date.now() / 1000);
       const db = env.bsl_stats;
       await db.batch([
-        db.prepare(`DELETE FROM requests WHERE ts < ?`).bind(now - 7 * 86400),
+        // requests wird NICHT mehr geloescht — vollstaendige Zugriffsgeschichte
+        // seit Liveschaltung (LETZTE ZUGRIFFE historisch, /api/requests.json).
         db.prepare(`DELETE FROM pings WHERE ts < ?`).bind(now - 86400),
         db.prepare(`DELETE FROM agg_hourly WHERE h < ?`).bind(now - 7 * 86400),
         db.prepare(`DELETE FROM agg_cats_hourly WHERE h < ?`).bind(now - 2 * 86400),

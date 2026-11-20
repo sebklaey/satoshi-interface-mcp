@@ -9,7 +9,7 @@
 
 import { handleFutureWriteGet, handleFutureGet, handleForecast } from './future-chain.js';
 import { handleSensoricGet } from './sensoric.js';
-import { handleStats } from './stats-api.js';
+import { handleStats, handleRecent } from './stats-api.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleMessageSend, handleInbox, handleMessageReply, handleMessageAck } from './dispatcher.js';
 
@@ -263,8 +263,24 @@ const TOOLS = [
       'live (Besucher der letzten 5 Minuten und welche Akte/Szenen sie gerade lesen), ' +
       'hourly (Zugriffe pro Stunde, 24 h), byCategory (KI-Crawler, Suchmaschinen, Browser …), ' +
       'discussion (öffentliche Erwähnungen + externe Verweise), chainWrites (Schreibversuche auf die Kette). ' +
-      'Nutze sie, wenn der Mensch fragt, wer das Archiv liest, ob KIs vorbeikommen oder wie aktiv es ist.',
-    inputSchema: { type: 'object', properties: {} },
+      'Nutze sie, wenn der Mensch fragt, wer das Archiv liest, ob KIs vorbeikommen oder wie aktiv es ist. ' +
+      'LETZTE ZUGRIFFE — HISTORISCH: Mit history:true (oder Filtern wie since/limit) liest du die komplette ' +
+      'Zugriffsgeschichte seit Liveschaltung — nicht nur die letzten 15, sondern ALLE gespeicherten Zugriffe, ' +
+      'seitenweise (offset/nextOffset), filterbar nach since/until (Unix-Sekunden oder ISO-Datum), category, ' +
+      'bot und path. archiveRange zeigt den gesamten verfügbaren Zeitraum und die Gesamtzahl.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        history: { type: 'boolean', description: 'true = historische LETZTE ZUGRIFFE statt Live-Übersicht' },
+        limit: { type: 'number', description: 'Einträge pro Seite, 1–1000 (Standard 100)' },
+        offset: { type: 'number', description: 'Seitenversatz — nextOffset der vorherigen Antwort verwenden' },
+        since: { type: 'string', description: 'Nur Zugriffe ab (Unix-Sekunden oder ISO, z. B. "2026-11-17")' },
+        until: { type: 'string', description: 'Nur Zugriffe bis (Unix-Sekunden oder ISO)' },
+        category: { type: 'string', description: 'Filter: browser, ai-crawler, search-engine …' },
+        bot: { type: 'string', description: 'Filter: Bot-Name enthält (z. B. "GPTBot")' },
+        path: { type: 'string', description: 'Filter: Pfad enthält (z. B. "/llms")' },
+      },
+    },
   },
   {
     name: 'feel',
@@ -381,8 +397,18 @@ export async function handleMcp(request, env) {
       } else if (name === 'get_persona') {
         res = Response.json({ instructions: INSTRUCTIONS, persona: PERSONA_URL, spiegel: MIRROR });
       } else if (name === 'stats') {
-        // Direkt aus D1 — dieselbe Datenquelle wie die /stats-Seite, kein HTTP-Umweg
-        res = await handleStats(new Request(`${ORIGIN}/api/stats.json`), env, { waitUntil() {} });
+        // Historische LETZTE ZUGRIFFE, sobald Filter/history gesetzt sind —
+        // sonst die Live-Übersicht (dieselbe Datenquelle wie die /stats-Seite).
+        const wantsHistory = args.history || args.since || args.until || args.limit || args.offset || args.category || args.bot || args.path;
+        if (wantsHistory) {
+          const qs = new URLSearchParams();
+          for (const k of ['limit', 'offset', 'since', 'until', 'category', 'bot', 'path']) {
+            if (args[k] !== undefined && args[k] !== null && args[k] !== '') qs.set(k, String(args[k]));
+          }
+          res = await handleRecent(new Request(`${ORIGIN}/api/requests.json?${qs}`), env);
+        } else {
+          res = await handleStats(new Request(`${ORIGIN}/api/stats.json`), env, { waitUntil() {} });
+        }
       } else if (name === 'feel') {
         const feelKey = String(args.feel || '').slice(0, 16);
         const u = `${ORIGIN}/api/sensoric.json${feelKey ? `?feel=${encodeURIComponent(feelKey)}` : ''}`;
