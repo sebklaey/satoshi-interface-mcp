@@ -11,7 +11,7 @@ import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop
 import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat, handleMessageSend, handleInbox, handleMessageGet, handleMessageAck, handleMessageReply, handleConversation, retryDeliveries } from './dispatcher.js';
 import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaProof } from './sensoric.js';
 import { handleStats, handleRecent } from './stats-api.js';
-import { handleIpfsDoc, pinBackfill } from './ipfs.js';
+import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm } from './ipfs.js';
 
 const BOT_RULES = [
   // AI-Crawler zuerst (spezifisch vor generisch)
@@ -461,6 +461,13 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     // Kanonisches IPFS-Dokument eines Ketten-Eintrags (dezentrale Spiegelschicht)
     if (url.pathname === '/api/future-chain/ipfs.json') {
       return handleIpfsDoc(request, env);
+    }
+    if (url.pathname === '/api/future-chain/unpinned.json') {
+      return handleUnpinned(request, env);
+    }
+    if (url.pathname === '/api/future-chain/pinned') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handlePinnedConfirm(request, env);
     }
     // EDNA-1 Human Proof als offener Dienst — für externe Systeme OHNE AI
     if (url.pathname === '/api/edna/verify') {

@@ -124,8 +124,9 @@ export async function pinEntry(env, entry) {
   // kanonische Dokument bleibt dadurch fuer immer reproduzierbar, auch wenn
   // der Vorgaenger erst spaeter gespiegelt wird. (Identitaet: unveraenderbar.)
   try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN ipfs_prev_cid TEXT`).run(); } catch { /* existiert */ }
-  await env.bsl_stats.prepare('UPDATE future_chain SET ipfs_cid = ?, ipfs_prev_cid = ? WHERE seq = ?')
-    .bind(cid, prev?.ipfs_cid || null, entry.seq).run();
+  try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN ipfs_pinned INTEGER`).run(); } catch { /* existiert */ }
+  await env.bsl_stats.prepare('UPDATE future_chain SET ipfs_cid = ?, ipfs_prev_cid = ?, ipfs_pinned = ? WHERE seq = ?')
+    .bind(cid, prev?.ipfs_cid || null, pin.pinned ? 1 : 0, entry.seq).run();
   await env.bsl_stats.prepare(
     `INSERT OR REPLACE INTO counters (key, value) VALUES ('ipfs_head', ?)`)
     .bind(JSON.stringify({ seq: entry.seq, entry_hash: entry.entry_hash, cid, pinned: !!pin.pinned, at: entry.ts }))
@@ -171,6 +172,10 @@ export async function handleIpfsDoc(request, env) {
   }
   const bytes = canonicalDoc(r, prevCid);
   const cid = await cidForBytes(bytes);
+  if (url.searchParams.get('raw') === '1') {
+    return new Response(bytes, { headers: { ...CORS, 'Content-Type': 'application/json',
+      'X-IPFS-CID': cid, 'Cache-Control': 'public, max-age=31536000, immutable' } });
+  }
   const head = await env.bsl_stats.prepare(`SELECT value FROM counters WHERE key = 'ipfs_head'`).first().catch(() => null);
   return Response.json({
     ok: true,
@@ -187,4 +192,44 @@ export async function handleIpfsDoc(request, env) {
       step4: 'Kette auf IPFS durchlaufen: document.prev_cid → naechstaelterer Eintrag — bis prev_hash = Genesis und prev_cid = null.',
     },
   }, { headers: { ...CORS, 'Cache-Control': 'public, max-age=31536000, immutable' } });
+}
+
+/* GET /api/future-chain/unpinned.json — vom eigenen Kubo-Pin-Daemon abgefragt:
+   Eintraege mit bekannter CID, die noch nicht physisch auf IPFS liegen. */
+export async function handleUnpinned(request, env) {
+  try { await env.bsl_stats.prepare(`ALTER TABLE future_chain ADD COLUMN ipfs_pinned INTEGER`).run(); } catch { /* ok */ }
+  const rows = await env.bsl_stats.prepare(
+    `SELECT seq, ipfs_cid FROM future_chain
+     WHERE ipfs_cid IS NOT NULL AND (ipfs_pinned IS NULL OR ipfs_pinned = 0)
+     ORDER BY seq ASC LIMIT 200`).all();
+  return Response.json({
+    ok: true,
+    count: (rows.results || []).length,
+    entries: (rows.results || []).map((r) => ({
+      seq: r.seq, cid: r.ipfs_cid,
+      raw: `https://satoshi-interface.com/api/future-chain/ipfs.json?raw=1&seq=${r.seq}`,
+    })),
+    confirm: 'POST /api/future-chain/pinned {seq, cid, token} — nach erfolgreichem ipfs add + pin',
+  }, { headers: { ...CORS, 'Cache-Control': 'no-store' } });
+}
+
+/* POST /api/future-chain/pinned — der Pin-Daemon bestaetigt das physische Pinning.
+   Geschuetzt durch das Worker-Secret IPFS_CONFIRM_TOKEN. Die CID muss exakt der
+   gespeicherten entsprechen — die Identitaet bleibt unantastbar. */
+export async function handlePinnedConfirm(request, env) {
+  if (request.method !== 'POST') return Response.json({ error: 'POST only' }, { status: 405, headers: CORS });
+  let b = {};
+  try { b = await request.json(); } catch { /* unten 400 */ }
+  if (!env.IPFS_CONFIRM_TOKEN || b.token !== env.IPFS_CONFIRM_TOKEN) {
+    return Response.json({ ok: false, error: 'ungueltiger Token' }, { status: 403, headers: CORS });
+  }
+  const seq = parseInt(b.seq, 10);
+  const cid = String(b.cid || '').slice(0, 100);
+  if (!seq || !cid) return Response.json({ ok: false, error: 'seq und cid erforderlich' }, { status: 400, headers: CORS });
+  const row = await env.bsl_stats.prepare('SELECT ipfs_cid FROM future_chain WHERE seq = ?').bind(seq).first();
+  if (!row || row.ipfs_cid !== cid) {
+    return Response.json({ ok: false, error: 'CID stimmt nicht mit der Kette ueberein — Identitaet unantastbar' }, { status: 409, headers: CORS });
+  }
+  await env.bsl_stats.prepare('UPDATE future_chain SET ipfs_pinned = 1 WHERE seq = ?').bind(seq).run();
+  return Response.json({ ok: true, seq, cid, pinned: true }, { headers: CORS });
 }
