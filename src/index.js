@@ -195,6 +195,14 @@ function ensurePingProofColumns(env) {
     pingsMigrated = (async () => {
       try { await env.bsl_stats.prepare(`ALTER TABLE pings ADD COLUMN pc REAL`).run(); } catch { /* existiert */ }
       try { await env.bsl_stats.prepare(`ALTER TABLE pings ADD COLUMN pk TEXT`).run(); } catch { /* existiert */ }
+      try {
+        await env.bsl_stats.prepare(
+          `CREATE TABLE IF NOT EXISTS edna_humans (
+             session TEXT PRIMARY KEY,
+             first_ts INTEGER NOT NULL,
+             last_ts INTEGER NOT NULL,
+             max_pc REAL NOT NULL DEFAULT 0)`).run();
+      } catch { /* existiert */ }
     })();
   }
   return pingsMigrated;
@@ -208,13 +216,25 @@ async function handlePing(request, env) {
     const pc = typeof b.pc === 'number' && b.pc >= 0 && b.pc <= 1 ? b.pc : null;
     const pk = b.pk ? String(b.pk).slice(0, 24) : null;
     await ensurePingProofColumns(env);
+    const now = Math.floor(Date.now() / 1000);
     await env.bsl_stats.prepare(
       `INSERT INTO pings (ts, session, act, scene, title, country, pc, pk) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(Math.floor(Date.now() / 1000), session,
+      .bind(now, session,
             b.act ? String(b.act).slice(0, 8) : null,
             Number.isInteger(b.n) ? b.n : null, title,
             request.cf?.country || null, pc, pk)
       .run();
+    // EDNA-verifizierte Menschen dauerhaft registrieren — einmal pro Session.
+    // Das ist der neue ALL-TIME-Menschenzähler: kein User-Agent nötig,
+    // nur der gelebte Rhythmus entscheidet.
+    if (pk === 'human_verified' || pk === 'likely_human') {
+      await env.bsl_stats.prepare(
+        `INSERT INTO edna_humans (session, first_ts, last_ts, max_pc) VALUES (?, ?, ?, ?)
+         ON CONFLICT(session) DO UPDATE SET last_ts = excluded.last_ts,
+           max_pc = MAX(edna_humans.max_pc, excluded.max_pc)`)
+        .bind(session, now, now, pc ?? 0)
+        .run();
+    }
   } catch { /* Beacon darf nie stören */ }
   return new Response(null, { status: 204, headers: CORS });
 }

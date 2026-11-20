@@ -54,7 +54,7 @@ export async function handleStats(request, env, ctx) {
     const now = Math.floor(Date.now() / 1000);
     const dayAgo = now - 86400;
     const db = env.bsl_stats;
-    const [bots, cats24, recent, counters, mentions, referrers, hourly, liveNow, liveReading, chainWrites, liveProof] = await Promise.all([
+    const [bots, cats24, recent, counters, mentions, referrers, hourly, liveNow, liveReading, chainWrites, liveProof, ednaAll] = await Promise.all([
       db.prepare(`SELECT bot, category, n, last FROM agg_bots ORDER BY n DESC LIMIT 30`).all(),
       db.prepare(`SELECT category, SUM(n) n FROM agg_cats_hourly WHERE h > ? GROUP BY category`)
         .bind(Math.floor(dayAgo / 3600) * 3600).all(),
@@ -85,6 +85,9 @@ export async function handleStats(request, env, ctx) {
       db.prepare(`SELECT pk, COUNT(DISTINCT session) n FROM pings
                   WHERE ts > ? GROUP BY pk`).bind(now - 300).all()
         .catch(() => ({ results: [] })),
+      // ALL-TIME: EDNA-verifizierte Menschen (einmal pro Session registriert)
+      db.prepare(`SELECT COUNT(*) n, MIN(first_ts) since FROM edna_humans`).first()
+        .catch(() => ({ n: 0, since: null })),
     ]);
     const cv = Object.fromEntries((counters.results || []).map((r) => [r.key, r.value]));
     // EDNA-1-Klassifikationen der Live-Sessions aggregieren
@@ -126,8 +129,10 @@ export async function handleStats(request, env, ctx) {
       },
       allTime: {
         totalRequests: cv.total ?? 0,
-        humanVisitors: cv.humans ?? 0,
-        since: cv.firstTs ? new Date(cv.firstTs * 1000).toISOString() : null,
+        // Nur noch EDNA-1-geprüfte Menschen — der Rhythmus entscheidet, nicht der User-Agent.
+        humanVisitors: ednaAll?.n ?? 0,
+        since: ednaAll?.since ? new Date(ednaAll.since * 1000).toISOString() : null,
+        legacyUaHumans: cv.humans ?? 0,
       },
     };
     const res = Response.json(body, {
