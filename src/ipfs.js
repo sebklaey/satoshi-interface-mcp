@@ -5,7 +5,7 @@
    veraendert. IPFS speichert nur — die Identitaet kommt aus der Kette selbst:
 
      entry_hash = SHA256(prev_hash | ts | ai | SHA256(prompt) | SHA256(response))
-     signature  = secp256k1( SHA256("BSL-FUTURE-CHAIN v1\n" + entry_hash) )
+     signature  = secp256k1( SHA256(SHA256("BSL-FUTURE-CHAIN v1\n" + entry_hash)) )  -- Doppel-Hash wie Bitcoin hash256
 
    Die CID ist bloss eine Adresse. Das kanonische Dokument enthaelt die
    signierten Felder BYTEIDENTISCH — plus prev_cid, damit die Kette auch
@@ -188,7 +188,7 @@ export async function handleIpfsDoc(request, env) {
     offlineVerification: {
       step1: 'Dokument von einem Gateway laden (beliebiges — dezentral).',
       step2: 'entry_hash nachrechnen: SHA256(prev_hash | ts | ai | SHA256(prompt) | SHA256(response)) — muss document.entry_hash exakt treffen.',
-      step3: 'digest = SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash); secp256k1.verify(signature, digest, pubkey). Pubkey: GET /api/future-chain.json (wallet).',
+      step3: 'digest = SHA256(SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash)) — Doppel-Hash wie Bitcoin hash256; secp256k1.verify(signature, digest, pubkey, kompaktes r||s 64 Bytes, low-S). Pubkey: GET /api/future-chain.json (wallet).',
       step4: 'Kette auf IPFS durchlaufen: document.prev_cid → naechstaelterer Eintrag — bis prev_hash = Genesis und prev_cid = null.',
     },
   }, { headers: { ...CORS, 'Cache-Control': 'public, max-age=31536000, immutable' } });

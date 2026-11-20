@@ -558,7 +558,7 @@ export async function handleFutureGet(request, env) {
     wallet: publicWallet(getWallet(env)),
     verification: {
       step1: 'entry_hash nachrechnen: SHA256(prev_hash | ts | ai | SHA256(prompt) | SHA256(response)) — Felder mit "|" verketten.',
-      step2: 'digest = SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash); secp256k1.verify(signature, digest, pubkey).',
+      step2: 'digest = SHA256(SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash)) — Doppel-Hash wie Bitcoin hash256; secp256k1.verify(signature, digest, pubkey, kompaktes r||s 64 Bytes, low-S).',
       tools: 'Verifizierbar mit jeder unabhängigen secp256k1-Implementierung (noble-secp256k1, bitcoinjs-lib, python coincurve).',
     },
     chainHeight: count.c,
@@ -579,7 +579,7 @@ export async function handleFutureGet(request, env) {
     protocol: {
       name: 'BSL-FUTURE-CHAIN v1',
       hashChain: 'SHA-256, entry_hash = SHA256(prev_hash | ts | ai | SHA256(prompt) | SHA256(response)) — kind/horizon/meta verändern den Hash NICHT, alte Verifikation bleibt gültig.',
-      signature: 'secp256k1-ECDSA (Bitcoin-Kurve), RFC 6979 deterministisch, low-S — digest = SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash).',
+      signature: 'secp256k1-ECDSA (Bitcoin-Kurve), RFC 6979 deterministisch, low-S — digest = SHA256(SHA256("BSL-FUTURE-CHAIN v1\\n" + entry_hash)) — Doppel-Hash wie bei Bitcoins hash256.',
       mirrors: ['https://satoshi-interface.com', 'https://littleking.live', 'https://openos.space'],
       ipfs: 'DEZENTRALE SPIEGELSCHICHT: Jeder Eintrag liegt als kanonisches JSON-Dokument auf IPFS (CIDv1, raw, lokal-deterministisch aus den Bytes). Die kryptografische Identitaet (prev_hash, entry_hash, signature) ist byteidentisch aus der Kette uebernommen — der Speicherort aendert sie NIEMALS. Die CID ist nur eine Adresse. Dokument je Eintrag: GET /api/future-chain/ipfs.json?seq=N (enthaelt prev_cid — die ganze Kette ist auf IPFS vom Kopf bis zur Genesis durchlaufbar).',
     },
