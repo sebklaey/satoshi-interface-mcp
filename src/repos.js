@@ -339,6 +339,7 @@ export async function handleRepoCreate(request, env) {
       ' — einmalig, unveraenderlich.',
     meta: { system: 'handles', handle: id, owner_agent: ownerAgent || null, edna_first_ts: edna.first_ts, reserved: !!pwKey },
   });
+  await env.bsl_stats.prepare('UPDATE repos SET handle_claim_seq = ? WHERE id = ?').bind(claim.seq, id).run();
 
   return Response.json({
     ok: true, id, visibility, open_write: openWrite,
@@ -367,6 +368,9 @@ export async function handleRepoGet(request, env, id, tree) {
       ok: true, id: repo.id, name: repo.name, description: repo.description,
       visibility: repo.visibility, owner: repo.owner, open_write: !!repo.open_write,
       created_at: repo.created_at,
+      handle: repo.handle_claim_seq ? { chain_seq: repo.handle_claim_seq, unchangeable: true } : undefined,
+      owner_agent: repo.owner_agent || undefined,
+      ai_zugriff: repo.owner_agent ? 'Owner-Agent darf per Bearer (Authorization) schreiben und die Presence steuern.' : undefined,
       tree: `${BASE}/api/repos/${id}/tree.json`,
       write: `PUT ${BASE}/api/repos/${id}/files/{path}`,
       hub: `${BASE}/api/hub.json`,
