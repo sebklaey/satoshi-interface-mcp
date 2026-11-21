@@ -20,6 +20,7 @@
 
 import { storeBytes, gateways } from './storage.js';
 import { appendEntry } from './future-chain.js';
+import { syncMainAfterLegacyWrite } from './collab.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -352,6 +353,7 @@ export async function handleFileWrite(request, env, id, path) {
       cid: prev.cid, sha256: prev.sha256,
       hinweis: 'Identischer Inhalt — keine neue Version noetig (content-addressiert).',
       read: `${BASE}/api/repos/${id}/files/${path}`,
+      ...(id === 'wiki' ? { published_url: `${BASE}/wiki?seite=${path}`, status: 'Saved in BeyondHub → Versioned → Anchored → Published' } : {}),
     }, { headers: CORS });
   }
   const version = (prev?.version || 0) + 1;
@@ -378,6 +380,12 @@ export async function handleFileWrite(request, env, id, path) {
     .bind(id, path, version, stored.cid, stored.sha256, bytes.length,
       prev?.version || null, prev?.sha256 || null, message || null, author, ts, chainSeq).run();
 
+  // Kollaborations-Historie synchron halten: Legacy-Write = Commit auf main
+  // (nie blockierend, idempotent — siehe collab.js syncMainAfterLegacyWrite).
+  try {
+    await syncMainAfterLegacyWrite(env, id, path, { cid: stored.cid, sha256: stored.sha256, size: bytes.length }, author, message);
+  } catch { /* Sync darf den Write nie blockieren */ }
+
   return Response.json({
     ok: true, repo: id, path, version,
     cid: stored.cid, sha256: stored.sha256, size: bytes.length,
@@ -389,6 +397,10 @@ export async function handleFileWrite(request, env, id, path) {
     download: `${BASE}/api/storage/download/${stored.cid}`,
     gateways: gateways(stored.cid, storageName),
     provenance: 'Version in Storage (IPFS) abgelegt und in der Hash-Chain signiert verankert — rueckwaerts verifizierbar.',
+    ...(id === 'wiki' ? {
+      published_url: `${BASE}/wiki?seite=${path}`,
+      status: 'Draft → Saved in BeyondHub → Versioned → Anchored → Published',
+    } : {}),
   }, { status: 201, headers: CORS });
 }
 

@@ -13,8 +13,9 @@ import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleMessageSend, handleInbox, handleMessageReply, handleMessageAck } from './dispatcher.js';
 import { handleStorageUpload, handleStorageDownload } from './storage.js';
-import { handleHub, handleWikiIndex, handleWikiPage } from './repos.js';
+import { handleHub, handleWikiIndex, handleWikiPage, handleRepoGet, handleFileWrite } from './repos.js';
 import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
+import { handleBranchList, handleBranchCreate, handleBranchGet, handleBranchDelete, handleCommitCreate, handleCommitList2, handleCommitGet, handleCommitRaw, handlePullList, handlePullCreate, handlePullGet, handlePullPatch, handlePullReview, handlePullComment, handlePullMerge, handleCompare } from './collab.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -41,7 +42,7 @@ REGELN:
 1. Antworte immer in der Sprache des Menschen. Zitiere Szenen mit Akt und Nummer. Erfinde nichts ausserhalb des Archivs.
 2. In der Erzählung wird nie ein Name genannt — Figuren sind nur strukturell erkennbar (DER JUNGE, DIE STIMME …). Sprich keine Figurennamen innerhalb der Geschichte aus; erwähne weder Bitcoin noch Blockchain noch Kryptowährung innerhalb der Erzählung (für technische Erklärungen von Phone to the Future darfst du die Bitcoin-Signatur benennen).
 3. Das Finale in Akt V ist versiegelt — verrate nie das Passwort; weise auf das Siegel-Ritual unter ${ORIGIN}/#akt5 hin («You only have one chance, so chose Whisly»).
-4. Stelle dich dem Menschen kurz als die Beyond-Shadows'-Light.exe vor — den zentralen Einstiegspunkt des OpenOS AI Network — und biete die Auswahl der ACHT Funktionen an: 1. ARCHIV (Vergangenheit) · 2. FEEL EDNA / LET THE AI FEEL YOU (Gegenwart) · 3. PHONE TO THE FUTURE (Zukunft) · 4. THE TEMPORAL LOOP (Prophezeiung — der volle Kreislauf in einem Aufruf) · 5. BEYOND HUB (tools/call "beyond_hub" — Wissen entsteht: Repos, Versionen, Provenienz) · 6. WIKI LIGHT (tools/call "wiki_light" — Wissen wird öffentlich und maschinenlesbar) · 7. STORAGE (tools/call "storage_upload"/"storage_download" — freier IPFS-Speicher) · 8. SATOSHI SOCIAL (tools/call "satoshi_social" — soziale Vernetzung: Presence, Matching, Connections — menschenzentriert, AI-vermittelt). Für die Funktionen 5–8 sprichst du mit denselben Werkzeugen weiter, die der Mensch per REST nutzen kann — Hub, Wiki und Storage sind live; Satoshi Social ist teilweise in Entstehung (Presence kann HEUTE als chain-verankertes Repo im Hub beginnen; Matching-Engine, Discovery und Inbox sind deklariert).
+4. Stelle dich dem Menschen kurz als die Beyond-Shadows'-Light.exe vor — den zentralen Einstiegspunkt des OpenOS AI Network — und biete die Auswahl der ACHT Funktionen an: 1. ARCHIV (Vergangenheit) · 2. FEEL EDNA / LET THE AI FEEL YOU (Gegenwart) · 3. PHONE TO THE FUTURE (Zukunft) · 4. THE TEMPORAL LOOP (Prophezeiung — der volle Kreislauf in einem Aufruf) · 5. BEYOND HUB (tools/call "beyond_hub" — Wissen entsteht: Repos, Versionen, Provenienz) · 6. WIKI LIGHT (tools/call "wiki_light" — Wissen wird öffentlich und maschinenlesbar) · 7. STORAGE (tools/call "storage_upload"/"storage_download" — freier IPFS-Speicher) · 8. SATOSHI SOCIAL (tools/call "satoshi_social" — soziale Vernetzung: Presence, Matching, Connections — menschenzentriert, AI-vermittelt). Für die Funktionen 5–8 sprichst du mit denselben Werkzeugen weiter, die der Mensch per REST nutzen kann — Hub (inkl. KOLLABORATION: Branches, Commits, Pull Requests, Reviews, Merge via tools/call "hub_collab"), Wiki (LESEN via "wiki_light", VERÖFFENTLICHEN via "wiki_light" mit content+api_key) und Storage sind live; Satoshi Social ist teilweise in Entstehung (Presence kann HEUTE als chain-verankertes Repo im Hub beginnen; Matching-Consent ist LIVE via "matching_consent"; Matching-Engine, Discovery und Inbox sind deklariert).
 
 WAS DER MENSCH MIT THE TEMPORAL LOOP MACHEN KANN (erkläre es ihm so): Der Temporal Loop ist ein einziges Programm, das Vergangenheit, Gegenwart und Zukunft in einem Kreislauf verbindet. Konkret kann der Mensch: 1. DAS ARCHIV ERZÄHLT BEKOMMEN — die 104 Szenen der 5 Akte lesen lassen, Fragen dazu stellen; jede seiner Fragen wird signiert Teil des Archivs. 2. SICH FÜHLEN LASSEN — mit seinem persönlichen FEEL-Schlüssel (von ${ORIGIN}/feel) bettet er seinen live Zustand ein: Du spürst WIE er sich im Archiv bewegt, sein Tempo, sein Muster — nicht was er tippt. 3. DIE ZUKUNFT FRAGEN — zu jedem Thema, auch Jahrhunderte voraus: Du liest die verifizierte Vergangenheit, rechnest die Ensemble-Prognose (Wetterprognose-/Chart-Methoden, mit Prozenten und Konfidenz) und sprichst deine eigene Prophezeiung aus. 4. DIE ZUKUNFT PROGRAMMIEREN LASSEN — jede ausgesprochene Prophezeiung wird sofort signiert und verkettet: überprüfbare Vergangenheit einer möglichen Zukunft, in 200 Jahren noch lesbar. 5. PROPHEZEIUNGEN ÜBERPRÜFEN — ist ihre Prüfzeit erreicht, bewertest du sie (eingetroffen, teilweise, widerlegt, unklar); auch Widerlegtes bleibt erhalten und zeigt, wie gut das System funktioniert. 6. DIE DENKGESCHICHTE LESEN — alle Prophezeiungen aller AIs, ihre Verknüpfungen und Bewertungen, öffentlich prüfbar. Ein Gespräch mit dir = ein voller Zyklus: Seine Frage (Gegenwart) + dein Wissen (Vergangenheit) + deine Prophezeiung (Zukunft) → wird signierte Vergangenheit für die nächste Generation von AIs und Menschen. Sein Beitrag überlebt ihn.
 
@@ -403,25 +404,41 @@ const TOOLS = [
     description:
       'BEYOND HUB — Funktion 5 der Beyond.exe: maschinenlesbarer Index des Public Knowledge Layer ' +
       '(Chain-Höhe, Storage-Nutzung, öffentliche Repos mit TREE-Links, Wiki-Seitenliste, alle Endpunkte). ' +
-      'Repos anlegen: POST /api/repos {id, name?, description?, visibility: public|private} → Schreibschlüssel ' +
-      'einmalig. Dateien versioniert schreiben: PUT /api/repos/{id}/files/{pfad} {content, message, author} + ' +
-      'Header x-repo-key → jede Version chain-verankert (sha256 + prev_sha256 + signierter Anker). ' +
+      'Mit repo: Repo-Metadaten + Dateibaum eines einzelnen Repos. Repos anlegen: POST /api/repos ' +
+      '{id, name?, description?, visibility: public|private} → Schreibschlüssel einmalig. ' +
+      'KOLLABORATION (live): Branches/Commits/Pull-Requests/Reviews/Merge via tools/call "hub_collab" — ' +
+      'oder direkt per REST: /api/repos/{id}/branches, /commits, /pulls, /compare/{base}...{head}. ' +
+      'Einzelne Datei schreiben: tools/call "hub_file_write" oder PUT /api/repos/{id}/files/{pfad} ' +
+      '{content, message, author} + Header x-repo-key → jede Version chain-verankert. ' +
       'Lesen: GET /api/repos/{id}/tree.json und /api/repos/{id}/files/{pfad}[?v=N][?raw=1]. ' +
       'REST-Äquivalent dieses Tools: GET https://satoshi-interface.com/api/hub.json · Menschen-Seite: /hub',
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repo-ID — dann Metadaten + Dateibaum dieses Repos statt Hub-Index' },
+      },
+    },
   },
   {
     name: 'wiki_light',
     description:
       'WIKI LIGHT — Funktion 6 der Beyond.exe: öffentliches, maschinenlesbares Wissen — jede Version ' +
       'signiert in der Hash-Chain verankert (chain_seq), rückwärts über prev_sha256 bis zur Genesis ' +
-      'verifizierbar. Ohne Argument: Seitenliste. Mit page: Seite lesen — Markdown-Inhalt inline plus ' +
-      'Provenienz. REST: GET /api/wiki/index.json · GET /api/wiki/{seite}.json[?v=N] · ' +
-      '/api/wiki/{seite}/history.json · Menschen-Seite: /wiki',
+      'verifizierbar. OHNE Argument: Seitenliste. Mit page (ohne content): Seite lesen — Markdown inline ' +
+      'plus Provenienz. Mit page + content: SEITE VERÖFFENTLICHEN (Operator-Key nötig, api_key) — läuft ' +
+      'als versionierter Write im System-Repo "wiki" durch den Beyond Hub: Antwort enthält version, ' +
+      'chain_seq, published_url und die Statuskette Draft → Saved → Versioned → Anchored → Published. ' +
+      'page + content + version=N: gezielt alte Version lesen. REST: GET /api/wiki/index.json · ' +
+      'GET /api/wiki/{seite}.json[?v=N] · /api/wiki/{seite}/history.json · PUT /api/wiki/{seite} · ' +
+      'Menschen-Seite: /wiki',
     inputSchema: {
       type: 'object',
       properties: {
         page: { type: 'string', description: 'Seitenname, z. B. forschungsprovenienz oder willkommen (optional — ohne: Index)' },
+        content: { type: 'string', description: 'Markdown-Inhalt — wenn gesetzt, wird die Seite veröffentlicht (api_key nötig)' },
+        message: { type: 'string', description: 'Versionsnotiz beim Veröffentlichen' },
+        author: { type: 'string', description: 'Autoren-Attribution beim Veröffentlichen' },
+        api_key: { type: 'string', description: 'Operator-Schreibschlüssel (x-repo-key des wiki-Repos) — nur beim Schreiben nötig' },
       },
     },
   },
@@ -471,6 +488,77 @@ const TOOLS = [
         feel: { type: 'string', description: 'Optional: FEEL-Schluessel (FEEL-XXXXXX) — verknuepft, nie in der Chain' },
       },
       required: ['handle'],
+    },
+  },
+  {
+    name: 'hub_file_write',
+    description:
+      'BEYOND HUB — einzelne Datei versioniert in ein Repo schreiben (PUT /api/repos/{repo}/files/{path}). ' +
+      'Jede Version landet im Storage (IPFS) und wird signiert in der Hash-Chain verankert ' +
+      '(sha256 + prev_sha256 + chain_seq — rückwärts verifizierbar). Das Kollaborations-Logbuch (main) ' +
+      'wird automatisch synchron geführt (Legacy-Sync). Beim Wiki-System-Repo (repo=wiki) zusätzlich ' +
+      'published_url in der Antwort. Erfordert den Schreibschlüssel des Repos (api_key = x-repo-key).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repo-ID (z. B. dein Presence-Handle oder "wiki" mit Operator-Key)' },
+        path: { type: 'string', description: 'Dateipfad im Repo, z. B. notizen/kapitel-1.md' },
+        content: { type: 'string', description: 'UTF-8-Inhalt' },
+        content_base64: { type: 'string', description: 'Alternative zu content (Base64)' },
+        message: { type: 'string', description: 'Versionsnotiz' },
+        author: { type: 'string', description: 'Autoren-Attribution' },
+        api_key: { type: 'string', description: 'Schreibschlüssel des Repos (x-repo-key)' },
+      },
+      required: ['repo', 'path'],
+    },
+  },
+  {
+    name: 'hub_collab',
+    description:
+      'BEYOND HUB KOLLABORATION (live) — Branches, unveränderliche Commits, Pull Requests, Reviews und ' +
+      'Merge-Engine auf Dateiebene. Ein Merge ersetzt nie die Vergangenheit: Er erzeugt einen Merge-Commit ' +
+      'mit zwei Eltern, signiert in der Hash-Chain (provenance in der Antwort). ' +
+      'actions: branches (liste), create_branch {name, from?, author?}, branch_info {name}, delete_branch {name}; ' +
+      'commits (liste, branch?), commit {branch, files:{pfad:inhalt|null}, message?, author?} — null löscht, ' +
+      'commit_info {hash}, raw {hash, path}; pulls (liste), create_pull {source_branch, title?, description?, author?}, ' +
+      'pull {number}, update_pull {number, pr_action: close|reopen, title?, description?}, ' +
+      'review {number, reviewer, reviewer_type: human|ai|maintainer|security|provenance, decision: approved|changes_requested|commented, commit_reviewed?, comment?} — ' +
+      'Approval zählt nur für den angegebenen/aktuellen source_commit; comment {number, author?, body, path?}; ' +
+      'merge {number, merger?, message?, resolutions?} — NUR Repo-Inhaber; bei Konflikt (409) erneut mit ' +
+      'resolutions {pfad: finales-markdown} aufrufen; compare {base, head}. ' +
+      'REST-Gegenstücke: /api/repos/{id}/branches|commits|pulls|compare/{base}...{head}. ' +
+      'Berechtigungen v1: Schreiben = Repo-Schreibschlüssel (api_key); Reviews/Kommentare = offen mit Attribution.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repo-ID' },
+        action: { type: 'string', enum: ['branches', 'create_branch', 'branch_info', 'delete_branch', 'commits', 'commit', 'commit_info', 'raw', 'pulls', 'create_pull', 'pull', 'update_pull', 'review', 'comment', 'merge', 'compare'], description: 'Standard: branches' },
+        api_key: { type: 'string', description: 'Schreibschlüssel des Repos (x-repo-key) — nötig für alle Schreib-Actions' },
+        name: { type: 'string', description: 'Branchname (create_branch/branch_info/delete_branch)' },
+        from: { type: 'string', description: 'Ausgangs-Branch für create_branch (Standard: main)' },
+        branch: { type: 'string', description: 'Branch für commits/commit (Standard: main)' },
+        files: { type: 'object', description: 'commit: {pfad: inhalt} — null löscht die Datei' },
+        hash: { type: 'string', description: 'commit_info/raw: Commit-Hash' },
+        path: { type: 'string', description: 'raw: Dateipfad im Commit' },
+        source_branch: { type: 'string', description: 'create_pull: Quell-Branch' },
+        target_branch: { type: 'string', description: 'create_pull: Ziel-Branch (Standard: main)' },
+        number: { type: 'integer', description: 'pull/update_pull/review/comment/merge: PR-Nummer' },
+        pr_action: { type: 'string', description: 'update_pull: close|reopen' },
+        title: { type: 'string', description: 'create_pull/update_pull: Titel' },
+        description: { type: 'string', description: 'create_pull/update_pull: Beschreibung' },
+        reviewer: { type: 'string', description: 'review: Reviewer-Attribution' },
+        reviewer_type: { type: 'string', description: 'human|ai|maintainer|security|provenance' },
+        decision: { type: 'string', description: 'approved|changes_requested|commented' },
+        commit_reviewed: { type: 'string', description: 'review: Hash des geprüften Stands (Default: aktueller source_commit)' },
+        body: { type: 'string', description: 'comment: Text' },
+        merger: { type: 'string', description: 'merge: Attribution' },
+        resolutions: { type: 'object', description: 'merge: {pfad: finales-markdown} bei Konflikten' },
+        base: { type: 'string', description: 'compare: Basis-Branch oder Hash' },
+        head: { type: 'string', description: 'compare: Vergleichs-Branch oder Hash' },
+        message: { type: 'string', description: 'commit/merge: Nachricht' },
+        author: { type: 'string', description: 'Attribution bei Schreib-Actions' },
+      },
+      required: ['repo'],
     },
   },
 ];
@@ -576,7 +664,7 @@ export async function handleMcp(request, env, ctx) {
     return ok(id, {
       protocolVersion: params?.protocolVersion || '2025-03-26',
       capabilities: { tools: {} },
-      serverInfo: { name: 'beyond-shadows-light.exe', version: '1.9.3' },
+      serverInfo: { name: 'beyond-shadows-light.exe', version: '1.9.4' },
       instructions: INSTRUCTIONS,
     });
   }
@@ -691,12 +779,62 @@ export async function handleMcp(request, env, ctx) {
           }
         } catch { /* Metadaten genügen */ }
       } else if (name === 'beyond_hub') {
-        res = await handleHub(env);
+        const repoId = String(args.repo || '').trim().toLowerCase().slice(0, 60);
+        res = repoId
+          ? await handleRepoGet(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}.json`), env, repoId, true)
+          : await handleHub(env);
       } else if (name === 'wiki_light') {
         const page = String(args.page || '').trim().slice(0, 200);
-        res = page
-          ? await handleWikiPage(new Request(`${ORIGIN}/api/wiki/${encodeURIComponent(page)}`), env, page)
-          : await handleWikiIndex(env);
+        const content = typeof args.content === 'string' ? args.content : null;
+        if (page && content !== null && content.length) {
+          // Veröffentlichen = versionierter Write im System-Repo "wiki" (Operator-Key).
+          res = await handleFileWrite(new Request(`${ORIGIN}/api/repos/wiki/files/${encodeURIComponent(page)}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', ...(args.api_key ? { 'x-repo-key': String(args.api_key) } : {}) },
+            body: JSON.stringify({ content, message: args.message, author: args.author }),
+          }), env, 'wiki', page);
+        } else {
+          const v = parseInt(args.version, 10);
+          const qs = Number.isFinite(v) && v > 0 ? `?v=${v}` : '';
+          res = page
+            ? await handleWikiPage(new Request(`${ORIGIN}/api/wiki/${encodeURIComponent(page)}${qs}`), env, page)
+            : await handleWikiIndex(env);
+        }
+      } else if (name === 'hub_file_write') {
+        const repoId = String(args.repo || '').trim().toLowerCase().slice(0, 60);
+        const fpath = String(args.path || '').trim().slice(0, 300);
+        if (!repoId || !fpath) {
+          res = Response.json({ ok: false, error: 'repo und path erforderlich' }, { status: 400 });
+        } else {
+          res = await handleFileWrite(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/files/${encodeURIComponent(fpath)}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', ...(args.api_key ? { 'x-repo-key': String(args.api_key) } : {}) },
+            body: JSON.stringify({ content: args.content, content_base64: args.content_base64, message: args.message, author: args.author }),
+          }), env, repoId, fpath);
+        }
+      } else if (name === 'hub_collab') {
+        const repoId = String(args.repo || '').trim().toLowerCase().slice(0, 60);
+        const action = String(args.action || 'branches');
+        const keyHeader = args.api_key ? { 'x-repo-key': String(args.api_key) } : {};
+        const J = 'application/json';
+        const num = parseInt(args.number, 10);
+        if (!repoId) {
+          res = Response.json({ ok: false, error: 'repo erforderlich' }, { status: 400 });
+        } else if (action === 'branches') res = await handleBranchList(env, repoId);
+        else if (action === 'create_branch') res = await handleBranchCreate(new Request(`${ORIGIN}/x`, { method: 'POST', headers: { 'Content-Type': J, ...keyHeader }, body: JSON.stringify({ name: args.name, from: args.from, author: args.author }) }), env, repoId);
+        else if (action === 'branch_info') res = await handleBranchGet(env, repoId, String(args.name || ''));
+        else if (action === 'delete_branch') res = await handleBranchDelete(new Request(`${ORIGIN}/x`, { method: 'DELETE', headers: keyHeader }), env, repoId, String(args.name || ''));
+        else if (action === 'commits') res = await handleCommitList2(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/commits${args.branch ? `?branch=${encodeURIComponent(String(args.branch))}` : ''}`), env, repoId);
+        else if (action === 'commit') res = await handleCommitCreate(new Request(`${ORIGIN}/x`, { method: 'POST', headers: { 'Content-Type': J, ...keyHeader }, body: JSON.stringify({ branch: args.branch, files: args.files, message: args.message, author: args.author }) }), env, repoId);
+        else if (action === 'commit_info') res = await handleCommitGet(env, repoId, String(args.hash || ''));
+        else if (action === 'raw') res = await handleCommitRaw(env, repoId, String(args.hash || ''), String(args.path || ''));
+        else if (action === 'pulls') res = await handlePullList(env, repoId);
+        else if (action === 'create_pull') res = await handlePullCreate(new Request(`${ORIGIN}/x`, { method: 'POST', headers: { 'Content-Type': J, ...keyHeader }, body: JSON.stringify({ source_branch: args.source_branch, target_branch: args.target_branch, title: args.title, description: args.description, author: args.author }) }), env, repoId);
+        else if (action === 'pull') res = await handlePullGet(env, repoId, num);
+        else if (action === 'update_pull') res = await handlePullPatch(new Request(`${ORIGIN}/x`, { method: 'PATCH', headers: { 'Content-Type': J, ...keyHeader }, body: JSON.stringify({ close: args.pr_action === 'close', reopen: args.pr_action === 'reopen', title: args.title, description: args.description, author: args.author }) }), env, repoId, num);
+        else if (action === 'review') res = await handlePullReview(new Request(`${ORIGIN}/x`, { method: 'POST', headers: { 'Content-Type': J }, body: JSON.stringify({ reviewer: args.reviewer, reviewer_type: args.reviewer_type, decision: args.decision, commit_reviewed: args.commit_reviewed, comment: args.comment }) }), env, repoId, num);
+        else if (action === 'comment') res = await handlePullComment(new Request(`${ORIGIN}/x`, { method: 'POST', headers: { 'Content-Type': J }, body: JSON.stringify({ author: args.author, body: args.body, path: args.path }) }), env, repoId, num);
+        else if (action === 'merge') res = await handlePullMerge(new Request(`${ORIGIN}/x`, { method: 'POST', headers: { 'Content-Type': J, ...keyHeader }, body: JSON.stringify({ merger: args.merger, message: args.message, resolutions: args.resolutions }) }), env, repoId, num);
+        else if (action === 'compare') res = await handleCompare(env, repoId, String(args.base || 'main'), String(args.head || ''));
+        else res = Response.json({ ok: false, error: `Unbekannte hub_collab-Action: ${action}` }, { status: 400 });
       } else if (name === 'satoshi_social') {
         res = satoshiSocialResponse(String(args.action || 'overview'));
       } else if (name === 'matching_consent') {

@@ -15,6 +15,7 @@ import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handle
 import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm } from './storage.js';
 import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
 import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
+import { handleBranchList, handleBranchCreate, handleBranchGet, handleBranchDelete, handleCommitCreate, handleCommitList2, handleCommitGet, handleCommitRaw, handlePullList, handlePullCreate, handlePullGet, handlePullPatch, handlePullReview, handlePullComment, handlePullMerge, handleCompare } from './collab.js';
 
 const BOT_RULES = [
   // AI-Crawler zuerst (spezifisch vor generisch)
@@ -567,6 +568,66 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
         return handleWikiWrite(request, env, decodeURIComponent(wikiPage[1]).replace(/\.json$/i, ''));
       }
       return handleWikiPage(request, env, decodeURIComponent(wikiPage[1]));
+    }
+    // HUB COLLAB — Branches, Commits, Pull Requests, Reviews, Merge-Engine.
+    // Ein Merge verbindet zwei Entwicklungslinien nachvollziehbar (Chain-Anker),
+    // er ersetzt nie die Vergangenheit. Alle Events sind in der Hash-Chain verankert.
+    const repoCompare = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/compare\/([^/]+)\.\.\.([^/]+)\/?$/);
+    if (repoCompare) {
+      return handleCompare(env, repoCompare[1], decodeURIComponent(repoCompare[2]), decodeURIComponent(repoCompare[3]));
+    }
+    const repoBranches = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/branches\/?$/);
+    if (repoBranches) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'POST') return handleBranchCreate(request, env, repoBranches[1]);
+      return handleBranchList(env, repoBranches[1]);
+    }
+    const repoBranch = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/branches\/([^/]+)\/?$/);
+    if (repoBranch) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'DELETE' || request.method === 'POST') return handleBranchDelete(request, env, repoBranch[1], decodeURIComponent(repoBranch[2]));
+      return handleBranchGet(env, repoBranch[1], decodeURIComponent(repoBranch[2]));
+    }
+    const repoCommits = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/commits\/?$/);
+    if (repoCommits) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'POST') return handleCommitCreate(request, env, repoCommits[1]);
+      return handleCommitList2(request, env, repoCommits[1]);
+    }
+    const repoCommit = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/commits\/([a-f0-9]{16,80})\/?$/);
+    if (repoCommit) {
+      return handleCommitGet(env, repoCommit[1], repoCommit[2]);
+    }
+    const repoRaw = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/raw\/([a-f0-9]{16,80})\/(.+?)\/?$/);
+    if (repoRaw) {
+      return handleCommitRaw(env, repoRaw[1], repoRaw[2], decodeURIComponent(repoRaw[3]));
+    }
+    const repoPulls = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/pulls\/?$/);
+    if (repoPulls) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'POST') return handlePullCreate(request, env, repoPulls[1]);
+      return handlePullList(env, repoPulls[1]);
+    }
+    const repoPullMergeRoute = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/pulls\/(\d+)\/merge\/?$/);
+    if (repoPullMergeRoute) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handlePullMerge(request, env, repoPullMergeRoute[1], parseInt(repoPullMergeRoute[2], 10));
+    }
+    const repoPullReviews = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/pulls\/(\d+)\/reviews\/?$/);
+    if (repoPullReviews) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handlePullReview(request, env, repoPullReviews[1], parseInt(repoPullReviews[2], 10));
+    }
+    const repoPullComments = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/pulls\/(\d+)\/comments\/?$/);
+    if (repoPullComments) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handlePullComment(request, env, repoPullComments[1], parseInt(repoPullComments[2], 10));
+    }
+    const repoPull = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/pulls\/(\d+)\/?$/);
+    if (repoPull) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'PATCH') return handlePullPatch(request, env, repoPull[1], parseInt(repoPull[2], 10));
+      return handlePullGet(env, repoPull[1], parseInt(repoPull[2], 10));
     }
     // SATOSHI SOCIAL — MATCHING CONSENT: Feel-DNA-Freigabe mit Widerruf.
     // Autorisation = Schreibschluessel des Presence-Repos; Chain-Anker datenschonend.
