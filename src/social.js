@@ -71,11 +71,25 @@ function ensureSocialTables(env) {
   return migrated;
 }
 
-async function authorize(env, handle, key) {
+async function resolveAgentId(env, request) {
+  const h = request.headers.get('authorization') || '';
+  const raw = h.toLowerCase().startsWith('bearer ') ? h.slice(7).trim() : '';
+  if (!raw) return null;
+  const a = await env.bsl_stats.prepare(
+    "SELECT agent_id FROM agents WHERE api_key_hash = ? AND status = 'active'").bind(await sha256hexStr(raw)).first();
+  return a ? a.agent_id : null;
+}
+
+async function authorize(env, handle, key, request = null) {
   const repo = await env.bsl_stats.prepare('SELECT * FROM repos WHERE id = ?').bind(handle).first();
   if (!repo) return { ok: false, status: 404, error: `Presence-Repo "${handle}" unbekannt — erst POST /api/repos anlegen` };
   if (repo.key_hash && repo.key_hash !== (await sha256hexStr(key || ''))) {
-    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos)' };
+    // AI-Account-Verbund: der registrierte Owner-Agent darf mit seinem Bearer
+    if (request && repo.owner_agent) {
+      const agentId = await resolveAgentId(env, request);
+      if (agentId && agentId === repo.owner_agent) return { ok: true, repo, via_agent: agentId };
+    }
+    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos — oder als Owner-Agent per Bearer)' };
   }
   return { ok: true, repo };
 }
@@ -143,7 +157,7 @@ export async function handleDnaPut(request, env) {
   await ensureSocialTables(env);
   let b = {}; try { b = await request.json(); } catch { /* 400 */ }
   const handle = String(b.handle || '').trim().toLowerCase();
-  const auth = await authorize(env, handle, extractKey(request, b));
+  const auth = await authorize(env, handle, extractKey(request, b), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
   if (!(await consentActive(env, handle))) {
     return Response.json({ ok: false, error: 'Keine aktive Matching-Freigabe — erst POST /api/matching/consent {handle, categories:[...]} mit demselben Repo-Key' }, { status: 409, headers: CORS });
@@ -266,7 +280,7 @@ export async function handleMatch(request, env) {
   await ensureSocialTables(env);
   let b = {}; try { b = await request.json(); } catch { /* 400 */ }
   const handle = String(b.handle || '').trim().toLowerCase();
-  const auth = await authorize(env, handle, extractKey(request, b));
+  const auth = await authorize(env, handle, extractKey(request, b), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
   if (!(await consentActive(env, handle))) {
     return Response.json({ ok: false, error: 'Eigene Freigabe fehlt — Matching setzt aktive, widerrufbare Zustimmung voraus' }, { status: 409, headers: CORS });
@@ -335,7 +349,7 @@ export async function handleContact(request, env) {
   const from = String(b.from_handle || '').trim().toLowerCase();
   const to = String(b.to_handle || '').trim().toLowerCase();
   if (!from || !to || from === to) return Response.json({ ok: false, error: 'from_handle und to_handle erforderlich (verschieden)' }, { status: 400, headers: CORS });
-  const auth = await authorize(env, from, extractKey(request, b));
+  const auth = await authorize(env, from, extractKey(request, b), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
   if (!(await consentActive(env, from))) return Response.json({ ok: false, error: 'Eigene Freigabe fehlt' }, { status: 409, headers: CORS });
   const toConsent = await consentActive(env, to);
@@ -367,7 +381,7 @@ export async function handleContact(request, env) {
 export async function handleInboxGet(request, env, handle) {
   await ensureSocialTables(env);
   handle = String(handle || '').trim().toLowerCase();
-  const auth = await authorize(env, handle, extractKey(request, null));
+  const auth = await authorize(env, handle, extractKey(request, null), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
   const [inc, out] = await Promise.all([
     env.bsl_stats.prepare(
@@ -397,7 +411,7 @@ export async function handleContactResolve(request, env) {
   const id = String(b.id || '').slice(0, 40);
   const action = b.action === 'accept' ? 'accepted' : (b.action === 'decline' ? 'declined' : null);
   if (!id || !action) return Response.json({ ok: false, error: '{id, action: accept|decline} erforderlich' }, { status: 400, headers: CORS });
-  const auth = await authorize(env, handle, extractKey(request, b));
+  const auth = await authorize(env, handle, extractKey(request, b), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
   const r = await env.bsl_stats.prepare('SELECT * FROM contact_requests WHERE id = ?').bind(id).first();
   if (!r) return Response.json({ ok: false, error: 'Anfrage unbekannt' }, { status: 404, headers: CORS });
@@ -418,7 +432,7 @@ export async function handleContactResolve(request, env) {
 export async function handleConnections(request, env, handle) {
   await ensureSocialTables(env);
   handle = String(handle || '').trim().toLowerCase();
-  const auth = await authorize(env, handle, extractKey(request, null));
+  const auth = await authorize(env, handle, extractKey(request, null), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
   const rows = await env.bsl_stats.prepare(
     `SELECT * FROM contact_requests WHERE status = 'accepted' AND (from_handle = ? OR to_handle = ?) ORDER BY updated_at DESC LIMIT 100`)

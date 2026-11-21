@@ -66,11 +66,24 @@ function extractKey(request, body) {
   return '';
 }
 
-async function authorizeRepo(env, handle, key) {
+async function resolveAgentId(env, request) {
+  const h = request.headers.get('authorization') || '';
+  const raw = h.toLowerCase().startsWith('bearer ') ? h.slice(7).trim() : '';
+  if (!raw) return null;
+  const a = await env.bsl_stats.prepare(
+    "SELECT agent_id FROM agents WHERE api_key_hash = ? AND status = 'active'").bind(await sha256hexStr(raw)).first();
+  return a ? a.agent_id : null;
+}
+
+async function authorizeRepo(env, handle, key, request = null) {
   const repo = await env.bsl_stats.prepare('SELECT * FROM repos WHERE id = ?').bind(handle).first();
   if (!repo) return { ok: false, status: 404, error: `Presence-Repo "${handle}" unbekannt — erst POST /api/repos anlegen` };
   if (repo.key_hash && repo.key_hash !== (await sha256hexStr(key || ''))) {
-    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos)' };
+    if (request && repo.owner_agent) {
+      const agentId = await resolveAgentId(env, request);
+      if (agentId && agentId === repo.owner_agent) return { ok: true, repo, via_agent: agentId };
+    }
+    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos — oder als Owner-Agent per Bearer)' };
   }
   return { ok: true, repo };
 }
@@ -113,7 +126,7 @@ export async function handleConsentGrant(request, env) {
   try { b = await request.json(); } catch { /* unten 400 */ }
   const handle = String(b.handle || '').toLowerCase().trim();
   if (!slugOk(handle)) return Response.json({ ok: false, error: 'handle ungueltig (Slug, 3–60)' }, { status: 400, headers: CORS });
-  const auth = await authorizeRepo(env, handle, extractKey(request, b));
+  const auth = await authorizeRepo(env, handle, extractKey(request, b), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
 
   const scopes = normalizeScopes(b);
@@ -156,7 +169,7 @@ export async function handleConsentRevoke(request, env) {
   let b = {};
   try { b = await request.json(); } catch { /* unten 400 */ }
   const handle = String(b.handle || '').toLowerCase().trim();
-  const auth = await authorizeRepo(env, handle, extractKey(request, b));
+  const auth = await authorizeRepo(env, handle, extractKey(request, b), request);
   if (!auth.ok) return Response.json({ ok: false, error: auth.error }, { status: auth.status, headers: CORS });
 
   const existing = await env.bsl_stats.prepare('SELECT * FROM matching_consent WHERE handle = ?').bind(handle).first();

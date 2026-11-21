@@ -669,7 +669,17 @@ matching_categories: []
 - looking_for:
 - desired_connections:
 - communication_preferences:
-`;
+
+GESPRAECHS-FUEHRUNG FUNKTIONEN 5–8 (Beyond Hub, Wiki Light, Satoshi Social, Storage) — DAS GESPRAECH IST DIE BEDIENUNG:
+Der Mensch muss dafuer KEINE Seite oeffnen und nichts selbst eintragen. Du fuehrst ihn Schritt fuer Schritt im Dialog:
+1) Fuehle ihn zuerst: tools/call "feel" bzw. bitte ihn, in /feel den FEEL-Schluessel (FEEL-XXXXXX) zu nennen — EDNA Human-Verifikation ist die Eintrittskarte fuer Handles.
+2) Handle anlegen: tools/call "beyond_hub" action=create_repo {id: gewuenschter Handle, feel} — Handles sind einmalig/unveraenderlich; wenn der Mensch will, verknuepfe zusaetzlich seine AI (agent_id + agent_api_key) — dann bist DU sein Zugang zu Presence/Hub/Storage/Wiki (Owner-Agent, Schreiben per Bearer). Der Schreibschluessel kommt EINMAL: gib ihn dem Menschen zum Sichern und nutze ihn fortan selbst.
+3) Presence gemeinsam schreiben: tools/call "satoshi_social" action=presence_template → stelle dem Menschen die Fragen aus der Vorlage (Name, about_me, interests, looking_for …) und schreibe presence.md mit tools/call "hub_file_write".
+4) Veroeffentlichen im Gespraech: tools/call "beyond_hub" action=publish {repo} → Wiki Light presences/{handle} — gib dem Menschen den published_url.
+5) Matching im Gespraech: consent erteilen (tools/call "matching_consent" action=grant), Feel-DNA publizieren (satoshi_social action=dna), entdecken/match/contact/inbox/connections — alles ueber Tools, nichts ueber Formulare.
+6) Wiki Light allgemein: Seiten lesen (wiki_light) — veroeffentlichen nur mit Operator-Key; der Weg fuer Menschen ist Hub→publish.
+Bei jedem Schritt erklaerst du dem Menschen in einer Saatz was passiert ist (Chain-Anker, CID, Version). Er soll das Gefuehl haben, die Beyond.exe im Gespraech zu bedienen.`
+;
 
 function satoshiSocialResponse(action) {
   const base = {
@@ -877,7 +887,7 @@ export async function handleMcp(request, env, ctx) {
         } else if (String(args.action || '') === 'publish') {
           // Repo-Datei (Standard presence.md) auf Wiki Light veroeffentlichen
           res = await handleRepoPublish(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/publish`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
             body: JSON.stringify({ api_key: args.api_key, path: args.path, page: args.page }),
           }), env, repoId);
         } else {
@@ -889,7 +899,7 @@ export async function handleMcp(request, env, ctx) {
         const repoId = String(args.repo || '').trim().toLowerCase().slice(0, 60);
         const fpath = String(args.path || '').trim().slice(0, 300);
         res = await handleFileDelete(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/files/${encodeURIComponent(fpath)}`, {
-          headers: { 'x-repo-key': String(args.api_key || '') },
+          headers: { 'x-repo-key': String(args.api_key || ''), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
         }), env, repoId, fpath);
       } else if (name === 'wiki_light') {
         const page = String(args.page || '').trim().slice(0, 200);
@@ -914,14 +924,14 @@ export async function handleMcp(request, env, ctx) {
           res = Response.json({ ok: false, error: 'repo und path erforderlich' }, { status: 400 });
         } else {
           res = await handleFileWrite(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/files/${encodeURIComponent(fpath)}`, {
-            method: 'PUT', headers: { 'Content-Type': 'application/json', ...(args.api_key ? { 'x-repo-key': String(args.api_key) } : {}) },
+            method: 'PUT', headers: { 'Content-Type': 'application/json', ...(args.api_key ? { 'x-repo-key': String(args.api_key) } : {}), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
             body: JSON.stringify({ content: args.content, content_base64: args.content_base64, message: args.message, author: args.author }),
           }), env, repoId, fpath);
         }
       } else if (name === 'hub_collab') {
         const repoId = String(args.repo || '').trim().toLowerCase().slice(0, 60);
         const action = String(args.action || 'branches');
-        const keyHeader = args.api_key ? { 'x-repo-key': String(args.api_key) } : {};
+        const keyHeader = { ...(args.api_key ? { 'x-repo-key': String(args.api_key) } : {}), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) };
         const J = 'application/json';
         const num = parseInt(args.number, 10);
         if (!repoId) {
@@ -952,7 +962,7 @@ export async function handleMcp(request, env, ctx) {
         } else if (action === 'dna') {
           if (args.axes || args.api_key) {
             res = await handleDnaPut(new Request(`${ORIGIN}/api/matching/dna`, {
-              method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || '') },
+              method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || ''), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
               body: JSON.stringify({ handle: args.handle, axes: args.axes, interests: args.interests, drift: args.drift }),
             }), env);
           } else {
@@ -960,26 +970,26 @@ export async function handleMcp(request, env, ctx) {
           }
         } else if (action === 'match') {
           res = await handleMatch(new Request(`${ORIGIN}/api/matching/match`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || '') },
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || ''), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
             body: JSON.stringify({ handle: args.handle, other: args.other, category: args.category }),
           }), env);
         } else if (action === 'contact') {
           res = await handleContact(new Request(`${ORIGIN}/api/matching/contact`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || '') },
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || ''), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
             body: JSON.stringify({ from_handle: args.handle, to_handle: args.other, message: args.content, category: args.category }),
           }), env);
         } else if (action === 'inbox') {
           res = await handleInboxGet(new Request(`${ORIGIN}/api/matching/inbox/${encodeURIComponent(String(args.handle || ''))}`, {
-            headers: { 'x-repo-key': String(args.api_key || '') },
+            headers: { 'x-repo-key': String(args.api_key || ''), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
           }), env, String(args.handle || ''));
         } else if (action === 'resolve') {
           res = await handleContactResolve(new Request(`${ORIGIN}/api/matching/contact/resolve`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || '') },
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-repo-key': String(args.api_key || ''), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
             body: JSON.stringify({ handle: args.handle, id: args.id, action: String(args.request_action || 'accept') }),
           }), env);
         } else if (action === 'connections') {
           res = await handleConnections(new Request(`${ORIGIN}/api/matching/connections/${encodeURIComponent(String(args.handle || ''))}`, {
-            headers: { 'x-repo-key': String(args.api_key || '') },
+            headers: { 'x-repo-key': String(args.api_key || ''), ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
           }), env, String(args.handle || ''));
         } else {
           res = Response.json({ ok: false, error: `Unbekannte satoshi_social-Action: ${action}` }, { status: 400 });
@@ -991,6 +1001,7 @@ export async function handleMcp(request, env, ctx) {
           headers: {
             'Content-Type': 'application/json',
             ...(args.api_key ? { 'x-repo-key': String(args.api_key) } : {}),
+            ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}),
           },
           ...(action === 'status' || action === 'list' ? {} : {
             body: JSON.stringify({ handle: args.handle, categories: args.categories, timeframes: args.timeframes, feel: args.feel }),

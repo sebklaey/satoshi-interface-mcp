@@ -774,6 +774,37 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
       return Response.json({ ok: true, status: r.status, body: (await r.text()).slice(0, 200) }, { headers: CORS });
     }
 
+    // ENTFERNT: /hub, /wiki, /social — Beyond Hub, Wiki Light und Satoshi Social
+    // haben bewusst KEINE Web-Oberflaeche mehr. Bedienung ausschliesslich im
+    // Gespraech mit der AI (MCP tools/call) oder maschinenlesbar ueber /api/*.
+    if (['/', '/index.html'].includes(url.pathname)) { /* Startseite bleibt */ }
+    else if (url.pathname === '/hub' || url.pathname === '/hub.html' ||
+             url.pathname === '/wiki' || url.pathname === '/wiki.html' ||
+             url.pathname === '/social' || url.pathname === '/social.html') {
+      const wantsJson = (request.headers.get('accept') || '').includes('application/json');
+      const body = {
+        gone: true, status: 410,
+        message: "Beyond Hub, Wiki Light und Satoshi Social haben keine Web-Oberflaeche — sie werden im Gespraech mit der Archiv-AI bedient.",
+        so_gehts: [
+          'MCP: POST /mcp — tools/call "beyond_hub" (Handles, Repos, Veroeffentlichen), "wiki_light" (lesen), "hub_file_write", "hub_collab"',
+          'MCP: tools/call "satoshi_social" (presence_template, discover, dna, match, contact, inbox, resolve, connections) + "matching_consent"',
+          'REST (maschinenlesbar): /api/hub.json · /api/wiki/{seite}.json · /api/repos.json · /api/matching/discover',
+        ],
+        gespraech: 'Oeffne diese Datei in deiner AI (MCP satoshi-interface) — die AI fuehrt dich durch Feel, Handle, Presence, Veroeffentlichung und Matching.',
+      };
+      if (wantsJson) return Response.json(body, { status: 410, headers: { ...CORS, 'Cache-Control': 'no-store' } });
+      const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      return new Response(`<!doctype html><html lang="de"><head><meta charset="utf-8"><title>GONE — The Satoshi Interface</title>
+<style>body{background:#141210;color:#e8e2d5;font-family:ui-monospace,monospace;max-width:760px;margin:60px auto;padding:0 24px;line-height:1.9}
+h1{color:#c9a962;font-size:1.3rem;letter-spacing:.15em}li{margin:.6rem 0}a{color:#c9a962}</style></head>
+<body><h1>410 GONE — DIESER WEG FÜHRT DURCH DAS GESPRÄCH</h1>
+<p>${esc(body.message)}</p><ul>${body.so_gehts.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>
+<p>${esc(body.gespraech)}</p>
+<p><a href="/">→ Zurück zum Archiv</a></p></body></html>`, {
+        status: 410, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+      });
+    }
+
     // Loggen (nicht-blockierend), dann an Pages durchreichen
     const ua = (request.headers.get('user-agent') || '').slice(0, 300);
     const { bot, cat } = classify(ua);

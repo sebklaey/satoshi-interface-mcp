@@ -446,7 +446,7 @@ export async function handleFileWrite(request, env, id, path) {
       cid: prev.cid, sha256: prev.sha256,
       hinweis: 'Identischer Inhalt — keine neue Version noetig (content-addressiert).',
       read: `${BASE}/api/repos/${id}/files/${path}`,
-      ...(id === 'wiki' ? { published_url: `${BASE}/wiki?seite=${path}`, status: 'Saved in BeyondHub → Versioned → Anchored → Published' } : {}),
+      ...(id === 'wiki' ? { published_url: `${BASE}/api/wiki/${encodeURIComponent(path)}.json`, status: 'Saved in BeyondHub → Versioned → Anchored → Published' } : {}),
     }, { headers: CORS });
   }
   const version = (prev?.version || 0) + 1;
@@ -491,7 +491,7 @@ export async function handleFileWrite(request, env, id, path) {
     gateways: gateways(stored.cid, storageName),
     provenance: 'Version in Storage (IPFS) abgelegt und in der Hash-Chain signiert verankert — rueckwaerts verifizierbar.',
     ...(id === 'wiki' ? {
-      published_url: `${BASE}/wiki?seite=${path}`,
+      published_url: `${BASE}/api/wiki/${encodeURIComponent(path)}.json`,
       status: 'Draft → Saved in BeyondHub → Versioned → Anchored → Published',
     } : {}),
   }, { status: 201, headers: CORS });
@@ -775,7 +775,7 @@ export async function handleRepoPublish(request, env, id) {
     repo: id, source: { path: srcPath, version: src.version, sha256: src.sha256, cid: src.cid },
     page,
     wiki: { version: wikiJson.version, chain_seq: wikiJson.chain_seq, sha256: wikiJson.sha256 },
-    published_url: `${BASE}/wiki?seite=${encodeURIComponent(page)}`,
+    published_url: `${BASE}/api/wiki/${encodeURIComponent(page)}.json`,
     json_url: `${BASE}/api/wiki/${encodeURIComponent(page)}.json`,
     provenance: `Hub v${src.version} (sha256 ${String(src.sha256).slice(0, 16)}…) → Wiki Light v${wikiJson.version}, signierter Anker #${wikiJson.chain_seq} — Rueckwaerts verifizierbar.`,
     widerruf: 'Ruecknahme: DELETE /api/repos/wiki/files/' + encodeURIComponent(page) + ' (Operator) — der History-Eintrag bleibt in der Chain.',
