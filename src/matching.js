@@ -66,6 +66,17 @@ function extractKey(request, body) {
   return '';
 }
 
+
+/* Delegations (Beyond-Hub-Regel: ein Handle = ein unveraenderlicher Eigentuemer;
+   neue Agenten brauchen eine signierte Delegation des Eigentuemers, verankert in der Chain). */
+export async function delegationActive(env, handle, agentId) {
+  if (!agentId) return false;
+  const now = Math.floor(Date.now() / 1000);
+  const d = await env.bsl_stats.prepare(
+    'SELECT status, expires FROM repo_delegations WHERE handle = ? AND agent_id = ?').bind(handle, agentId).first();
+  return !!d && d.status === 'active' && (!d.expires || d.expires > now);
+}
+
 async function resolveAgentId(env, request) {
   const h = request.headers.get('authorization') || '';
   const raw = h.toLowerCase().startsWith('bearer ') ? h.slice(7).trim() : '';
@@ -83,7 +94,11 @@ async function authorizeRepo(env, handle, key, request = null) {
       const agentId = await resolveAgentId(env, request);
       if (agentId && agentId === repo.owner_agent) return { ok: true, repo, via_agent: agentId };
     }
-    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos — oder als Owner-Agent per Bearer)' };
+    if (request) {
+      const agentId = await resolveAgentId(env, request);
+      if (agentId && await delegationActive(env, handle, agentId)) return { ok: true, repo, via_agent: agentId, delegated: true };
+    }
+    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos — oder als Eigentuemer/delegierter Agent per Bearer)' };
   }
   return { ok: true, repo };
 }

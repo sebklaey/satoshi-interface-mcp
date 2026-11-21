@@ -13,7 +13,7 @@ import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleMessageSend, handleInbox, handleMessageReply, handleMessageAck } from './dispatcher.js';
 import { handleStorageUpload, handleStorageDownload, handleStorageDelete } from './storage.js';
-import { handleHub, handleWikiIndex, handleWikiPage, handleRepoGet, handleFileWrite, handleFileDelete, handleRepoCreate, handleRepoPublish } from './repos.js';
+import { handleHub, handleWikiIndex, handleWikiPage, handleRepoGet, handleFileWrite, handleFileDelete, handleRepoCreate, handleRepoPublish, handleDelegationsList, handleDelegate, handleDelegateRevoke } from './repos.js';
 import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
 import { handleDnaPut, handleDnaGet, handleDiscover, handleMatch, handleContact, handleInboxGet, handleContactResolve, handleConnections } from './social.js';
 import { handleBranchList, handleBranchCreate, handleBranchGet, handleBranchDelete, handleCommitCreate, handleCommitList2, handleCommitGet, handleCommitRaw, handlePullList, handlePullCreate, handlePullGet, handlePullPatch, handlePullReview, handlePullComment, handlePullMerge, handleCompare } from './collab.js';
@@ -447,8 +447,10 @@ const TOOLS = [
       'Mit repo: Repo-Metadaten + Dateibaum eines einzelnen Repos. REPO ANLEGEN (auch via MCP, kein REST ' +
       'nötig): action=create_repo {id, feel: "FEEL-XXXXXX" — PFLICHT: EDNA Human-Verifikation aus /feel, ' +
       'Gueltig 7 Tage; alternativ session} [agent_id + agent_api_key: verknüpft das Handle mit dem AI-Account ' +
-      'des Users — seine AI greift dann auf Presence/Hub/Storage/Wiki zu; claim_password nur fuer reservierte ' +
-      'Handles wie "satoshi"] → Schreibschlüssel ' +
+      'des Users — seine AI greift dann auf Presence/Hub/Storage/Wiki zu. BESITZREGEL: ein Handle = ein ' +
+      'unveraenderlicher Eigentuemer — KEIN Claim-Passwort, keine Uebertragung; neue Agenten nur per ' +
+      'kryptographisch signierter Delegation (Ed25519), DELEGATE/REVOKE chain-verankert. Delegieren: ' +
+      'action=delegate {repo, agent_id, signature, ts} — Liste: action=delegations — Widerruf: action=revoke_delegation] → Schreibschlüssel ' +
       'EINMAL sichtbar (sicher aufbewahren — Satoshi Social, private Repos). Handles sind einmalig, ' +
       'unveraenderlich und werden als HANDLE-CLAIM signiert in der Hash-Chain verankert (chain_seq in der Antwort). ' +
       'REST-Äquivalent: POST /api/repos. ' +
@@ -463,7 +465,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['index', 'create_repo', 'publish'], description: 'Standard: index (Hub-Übersicht); publish = Repo-Datei auf Wiki Light veröffentlichen' },
+        action: { type: 'string', enum: ['index', 'create_repo', 'publish', 'delegate', 'delegations', 'revoke_delegation'], description: 'index=Hub-Übersicht · create_repo=Handle anlegen (EDNA-Pflicht) · publish=Wiki Light · delegate=Agent kryptografisch ermaechtigen (Eigentuemer only) · delegations=Liste · revoke_delegation=Widerruf (chain-verankert)' },
         repo: { type: 'string', description: 'Repo-ID — bei index: Metadaten + Dateibaum dieses Repos statt Hub-Index; bei publish: das zu veröffentlichende Repo' },
         id: { type: 'string', description: 'create_repo: gewünschte Handle/Repo-ID (Kleinbuchstaben, einmalig, unveraenderlich)' },
         name: { type: 'string', description: 'create_repo: Anzeigename' },
@@ -473,7 +475,11 @@ const TOOLS = [
         session: { type: 'string', description: 'create_repo Alternative zu feel: EDNA-Session' },
         agent_id: { type: 'string', description: 'create_repo optional: eigene Agent-ID — verknüpft Handle mit dem AI-Account (AI kann dann auf Presence/Hub/Storage/Wiki zugreifen)' },
         agent_api_key: { type: 'string', description: 'create_repo: Agent-API-Key (Bearer-Ersatz) zum Nachweis der agent_id' },
-        claim_password: { type: 'string', description: 'create_repo nur für reservierte Handles (z. B. "satoshi")' },
+        agent_id: { type: 'string', description: 'create_repo: AI-Account-Verknuepfung ODER delegate: zu ermaechtigender Agent' },
+        scopes: { type: 'array', items: { type: 'string' }, description: 'delegate: Scopes (Standard [write])' },
+        days: { type: 'integer', description: 'delegate: Laufzeit in Tagen (Standard 365)' },
+        signature: { type: 'string', description: 'delegate: Ed25519-Signatur des Eigentuemers ueber "BSL-DELEGATION v1\n"+handle+"\n"+agent_id+"\n"+ts' },
+        ts: { type: 'integer', description: 'delegate: Zeitstempel im signierten Payload' },
         api_key: { type: 'string', description: 'publish/delete: Schreibschluessel des Repos (x-repo-key)' },
         path: { type: 'string', description: 'publish: Quelldatei im Repo (Standard presence.md)' },
         page: { type: 'string', description: 'publish: Zielseite im Wiki (Standard presences/{handle})' },
@@ -874,16 +880,28 @@ export async function handleMcp(request, env, ctx) {
         if (String(args.action || '') === 'create_repo') {
           // Handle anlegen — braucht EDNA Human-Verified (feel/session) und kann
           // optional mit dem AI-Account des Aufrufers verknuempft werden (agent_id +
-          // agent_api_key). Reservierte Handles (z. B. "satoshi") brauchen claim_password.
+          // agent_api_key). BESITZREGEL: kein Claim-Passwort — Eigentuemer steht seit Erst-Vergabe fest; neue Agenten nur per signierter Delegation.
           res = await handleRepoCreate(new Request(`${ORIGIN}/api/repos`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               id: args.id, name: args.name, description: args.description, visibility: args.visibility,
               feel: args.feel, session: args.session,
               agent_id: args.agent_id, agent_api_key: args.agent_api_key,
-              claim_password: args.claim_password,
             }),
           }), env);
+        } else if (String(args.action || '') === 'delegate') {
+          // Kryptografisch verifizierte Delegation (Eigentuemer only, chain-verankert)
+          res = await handleDelegate(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/delegations`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
+            body: JSON.stringify({ agent_id: args.agent_id, scopes: args.scopes, days: args.days, signature: args.signature, ts: args.ts, api_key: args.api_key }),
+          }), env, repoId);
+        } else if (String(args.action || '') === 'delegations') {
+          res = await handleDelegationsList(env, repoId);
+        } else if (String(args.action || '') === 'revoke_delegation') {
+          res = await handleDelegateRevoke(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/delegations/${encodeURIComponent(String(args.agent_id || ''))}/revoke`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', ...(args.agent_api_key ? { authorization: 'Bearer ' + String(args.agent_api_key) } : {}) },
+            body: JSON.stringify({ api_key: args.api_key }),
+          }), env, repoId, String(args.agent_id || ''));
         } else if (String(args.action || '') === 'publish') {
           // Repo-Datei (Standard presence.md) auf Wiki Light veroeffentlichen
           res = await handleRepoPublish(new Request(`${ORIGIN}/api/repos/${encodeURIComponent(repoId)}/publish`, {

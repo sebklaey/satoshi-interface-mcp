@@ -22,7 +22,7 @@
    entsteht erst durch beidseitige menschliche Aktion. */
 
 import { appendEntry } from './future-chain.js';
-import { sha256hexStr } from './matching.js';
+import { sha256hexStr, delegationActive } from './matching.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -84,12 +84,16 @@ async function authorize(env, handle, key, request = null) {
   const repo = await env.bsl_stats.prepare('SELECT * FROM repos WHERE id = ?').bind(handle).first();
   if (!repo) return { ok: false, status: 404, error: `Presence-Repo "${handle}" unbekannt — erst POST /api/repos anlegen` };
   if (repo.key_hash && repo.key_hash !== (await sha256hexStr(key || ''))) {
-    // AI-Account-Verbund: der registrierte Owner-Agent darf mit seinem Bearer
+    // AI-Account-Verbund: der registrierte Eigentuemer-Agent + delegierte Agenten
     if (request && repo.owner_agent) {
       const agentId = await resolveAgentId(env, request);
       if (agentId && agentId === repo.owner_agent) return { ok: true, repo, via_agent: agentId };
     }
-    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos — oder als Owner-Agent per Bearer)' };
+    if (request) {
+      const agentId = await resolveAgentId(env, request);
+      if (agentId && await delegationActive(env, handle, agentId)) return { ok: true, repo, via_agent: agentId, delegated: true };
+    }
+    return { ok: false, status: 403, error: 'x-repo-key fehlt/ungueltig (Schreibschluessel des Presence-Repos — oder als Eigentuemer/delegierter Agent per Bearer)' };
   }
   return { ok: true, repo };
 }

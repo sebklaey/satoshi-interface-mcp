@@ -13,7 +13,7 @@ import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaPro
 import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handleIpfsGateway } from './ipfs.js';
 import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm, handleStorageDelete } from './storage.js';
-import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleFileDelete, handleRepoPublish, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
+import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleFileDelete, handleRepoPublish, handleDelegationsList, handleDelegate, handleDelegateRevoke, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
 import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
 import { handleDnaPut, handleDnaGet, handleDiscover, handleMatch, handleContact, handleInboxGet, handleContactResolve, handleConnections, handleWebhookLog, handleWebhookLogGet } from './social.js';
 import { handleBranchList, handleBranchCreate, handleBranchGet, handleBranchDelete, handleCommitCreate, handleCommitList2, handleCommitGet, handleCommitRaw, handlePullList, handlePullCreate, handlePullGet, handlePullPatch, handlePullReview, handlePullComment, handlePullMerge, handleCompare } from './collab.js';
@@ -601,6 +601,23 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     if (url.pathname === '/api/repos') {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
       return handleRepoCreate(request, env);
+    }
+    const delegations = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/delegations\/?$/);
+    if (delegations) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'GET') return handleDelegationsList(env, delegations[1]);
+      return handleDelegate(request, env, delegations[1]);
+    }
+    const delegationRevoke = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/delegations\/([a-z0-9-]{3,80})\/revoke\/?$/);
+    if (delegationRevoke) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleDelegateRevoke(request, env, delegationRevoke[1], delegationRevoke[2]);
+    }
+    const delegationOne = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/delegations\/([a-z0-9-]{3,80})\/?$/);
+    if (delegationOne) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'DELETE' || request.method === 'POST') return handleDelegateRevoke(request, env, delegationOne[1], delegationOne[2]);
+      return Response.json({ ok: false, error: 'GET: Liste ueber /api/repos/{id}/delegations' }, { status: 405, headers: CORS });
     }
     const repoPublish = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/publish\/?$/);
     if (repoPublish) {

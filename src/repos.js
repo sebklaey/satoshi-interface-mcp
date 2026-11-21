@@ -21,6 +21,7 @@
 import { storeBytes, gateways } from './storage.js';
 import { appendEntry } from './future-chain.js';
 import { syncMainAfterLegacyWrite } from './collab.js';
+import { delegationActive } from './matching.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -50,6 +51,17 @@ function ensureRepoTables(env) {
            created_at INTEGER NOT NULL)`).run();
       try { await env.bsl_stats.prepare('ALTER TABLE repos ADD COLUMN owner_agent TEXT').run(); } catch { /* Spalte existiert */ }
       try { await env.bsl_stats.prepare('ALTER TABLE repos ADD COLUMN handle_claim_seq INTEGER').run(); } catch { /* Spalte existiert */ }
+      await env.bsl_stats.prepare(
+        `CREATE TABLE IF NOT EXISTS repo_delegations (
+           handle TEXT NOT NULL,
+           agent_id TEXT NOT NULL,
+           scopes TEXT,
+           granted_by TEXT,
+           ts INTEGER NOT NULL,
+           expires INTEGER,
+           status TEXT NOT NULL DEFAULT 'active',
+           chain_seq INTEGER,
+           PRIMARY KEY (handle, agent_id))`).run();
       await env.bsl_stats.prepare(
         `CREATE TABLE IF NOT EXISTS repo_files (
            repo TEXT NOT NULL,
@@ -110,10 +122,12 @@ async function getRepo(env, id) {
   return env.bsl_stats.prepare('SELECT * FROM repos WHERE id = ?').bind(id).first();
 }
 
-async function canWrite(repo, key, agentId = null) {
+async function canWrite(env, repo, key, agentId = null) {
   if (repo.open_write) return true;
-  // AI-Account-Verbund: der registrierte Agent des Owners darf ebenfalls schreiben
+  // AI-Account-Verbund: der registrierte Eigentuemer-Agent darf schreiben
   if (repo.owner_agent && agentId && agentId === repo.owner_agent) return true;
+  // Delegierte Agenten (kryptografisch vom Eigentuemer bestaetigt, chain-verankert)
+  if (agentId && await delegationActive(env, repo.id, agentId)) return true;
   if (!repo.key_hash) return true;              // kein Schluessel hinterlegt = offen
   if (!key) return false;
   return (await sha256hexStr(key)) === repo.key_hash;
@@ -151,8 +165,6 @@ async function ednaHumanVerified(env, b) {
   return { session: sess, first_ts: h.first_ts, last_ts: h.last_ts, max_pc: h.max_pc };
 }
 
-/* Reservierte Handles — Claim nur mit Claim-Passwort (+ EDNA + AI-Account). */
-const RESERVED_HANDLES = { satoshi: 'HANDLE_PASSWORD_SATOSHI' };
 
 async function canRead(repo, key) {
   if (repo.visibility === 'public') return true;
@@ -264,7 +276,7 @@ export async function handleReposList(env) {
 export async function handleRepoCreate(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
   if (request.method !== 'POST') {
-    return Response.json({ error: 'POST only — JSON {id, name?, description?, visibility?, owner?, open_write?, feel?|session?, agent_id?, claim_password?}' }, { status: 405, headers: CORS });
+    return Response.json({ error: 'POST only — JSON {id, name?, description?, visibility?, owner?, open_write?, feel?|session?, agent_id?}' }, { status: 405, headers: CORS });
   }
   await ensureRepoTables(env);
   let b = {};
@@ -294,16 +306,10 @@ export async function handleRepoCreate(request, env) {
     }, { status: 428, headers: CORS });
   }
 
-  // 2) Reservierte Handles (z. B. "satoshi") — Claim-Passwort noetig
-  const pwKey = RESERVED_HANDLES[id];
-  if (pwKey) {
-    const want = env[pwKey] || (id === 'satoshi' ? '54197542' : '');
-    if (String(b.claim_password || '') !== want) {
-      return Response.json({ ok: false, error: `Handle "${id}" ist reserviert — claim_password erforderlich (Claim durch den Berechtigten, EDNA-verified + AI-Account).` }, { status: 403, headers: CORS });
-    }
-  }
-
-  // 3) AI-Account-Verbindung (optional, aber noetig damit die AI des Users auf
+  // 2) AI-Account-Verbindung (optional, aber noetig damit die AI des Users auf
+  //    Presence/Hub/Storage/Wiki-Daten zugreifen kann): agent_id + Bearer agent_api_key.
+  //    REGEL: Ein Handle = ein unveraenderlicher Eigentuemer. Es gibt KEINEN
+  //    Claim-/Uebertragungsweg mehr — die Erst-Vergabe mit EDNA + Agent ist final. (optional, aber noetig damit die AI des Users auf
   //    Presence/Hub/Storage/Wiki-Daten zugreifen kann): agent_id + Bearer agent_api_key
   const agent = await resolveAgent(env, request, b);
   let ownerAgent = null;
@@ -315,6 +321,8 @@ export async function handleRepoCreate(request, env) {
   } else if (agent) {
     ownerAgent = agent.agent_id;
   }
+  // Unveraenderlichkeit: existiert schon ein Eigentuemer, darf er nicht ersetzt werden
+  // (kein Uebertragungs-Endpoint, kein Claim-Passwort — der Eigentuemer steht seit der Erst-Vergabe fest).
 
   const visibility = b.visibility === 'private' ? 'private' : 'public';
   const openWrite = b.open_write === true && visibility === 'public';
@@ -335,9 +343,9 @@ export async function handleRepoCreate(request, env) {
     kind: 'archive',
     prompt: `HANDLE-CLAIM ${id}`,
     response: `Handle "${id}" vergeben — EDNA human-verified (session …${String(edna.session).slice(-8)}, first_ts ${edna.first_ts})` +
-      (ownerAgent ? `, AI-Account: ${ownerAgent}` : '') + (pwKey ? ', reserviert (Claim-Passwort)' : '') +
+      (ownerAgent ? `, AI-Account: ${ownerAgent}` : '') +
       ' — einmalig, unveraenderlich.',
-    meta: { system: 'handles', handle: id, owner_agent: ownerAgent || null, edna_first_ts: edna.first_ts, reserved: !!pwKey },
+    meta: { system: 'handles', handle: id, owner_agent: ownerAgent || null, edna_first_ts: edna.first_ts, reserved: false },
   });
   await env.bsl_stats.prepare('UPDATE repos SET handle_claim_seq = ? WHERE id = ?').bind(claim.seq, id).run();
 
@@ -411,7 +419,7 @@ export async function handleFileWrite(request, env, id, path) {
   let b = {};
   try { b = await request.json(); } catch { /* unten 400 */ }
   const key = extractKey(request, b);
-  if (!(await canWrite(repo, key, (await resolveAgent(env, request, b))?.agent_id || null))) {
+  if (!(await canWrite(env, repo, key, (await resolveAgent(env, request, b))?.agent_id || null))) {
     return Response.json({ ok: false, error: 'Schreibschluessel fehlt/ungueltig (x-repo-key)' }, { status: 403, headers: CORS });
   }
 
@@ -673,7 +681,7 @@ export async function handleFileDelete(request, env, id, path) {
   path = cleanPath(path);
   if (!path) return Response.json({ ok: false, error: 'Pfad fehlt/ungueltig' }, { status: 400, headers: CORS });
   const key = extractKey(request, null);
-  if (!(await canWrite(repo, key, (await resolveAgent(env, request, null))?.agent_id || null))) {
+  if (!(await canWrite(env, repo, key, (await resolveAgent(env, request, null))?.agent_id || null))) {
     return Response.json({ ok: false, error: 'Schreibschluessel fehlt/ungueltig (x-repo-key)' }, { status: 403, headers: CORS });
   }
   const latest = await latestVersion(env, id, path);
@@ -712,7 +720,7 @@ export async function handleRepoPublish(request, env, id) {
   let b = {};
   try { b = await request.json(); } catch { /* leer ok */ }
   const key = extractKey(request, b);
-  if (!(await canWrite(repo, key, (await resolveAgent(env, request, b))?.agent_id || null))) {
+  if (!(await canWrite(env, repo, key, (await resolveAgent(env, request, b))?.agent_id || null))) {
     return Response.json({ ok: false, error: 'Schreibschluessel fehlt/ungueltig (x-repo-key des Repos — oder als Owner-Agent per Bearer)' }, { status: 403, headers: CORS });
   }
   let srcPath = cleanPath(b.path) || 'presence.md';
@@ -784,4 +792,138 @@ export async function handleRepoPublish(request, env, id) {
     provenance: `Hub v${src.version} (sha256 ${String(src.sha256).slice(0, 16)}…) → Wiki Light v${wikiJson.version}, signierter Anker #${wikiJson.chain_seq} — Rueckwaerts verifizierbar.`,
     widerruf: 'Ruecknahme: DELETE /api/repos/wiki/files/' + encodeURIComponent(page) + ' (Operator) — der History-Eintrag bleibt in der Chain.',
   }, { status: 201, headers: CORS });
+}
+
+/* ============ DELEGATIONEN — kryptografisch verifizierte Agenten-Ermaechtigung ============
+   REGEL (Beyond.exe): Ein Handle = ein unveraenderlicher Eigentuemer. Nur der
+   Eigentuemer darf Agenten autorisieren — neue Agenten brauchen eine mit dem
+   Ed25519-Schluessel des Eigentuemers signierte Delegation. Jede Delegation und
+   jeder Widerruf wird als signierter Eintrag in der Hash-Chain protokolliert.
+   Auth: Repo-Schreibschluessel (Wurzel, menschengehalten) ODER Eigentuemer-Agent
+   per Bearer + gueltiger Delegationssignatur. */
+const delegationCanonical = (handle, agentId, ts) => `BSL-DELEGATION v1\n${handle}\n${agentId}\n${ts}`;
+
+async function hexToBytes(h) {
+  h = String(h || '').toLowerCase().trim();
+  if (!/^[0-9a-f]+$/.test(h) || h.length % 2) return null;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+async function ed25519VerifyHex(publicKeyHex, signatureHex, dataStr) {
+  const pk = await hexToBytes(publicKeyHex); const sig = await hexToBytes(signatureHex);
+  if (!pk || pk.length !== 32 || !sig || sig.length !== 64) return false;
+  try {
+    const key = await crypto.subtle.importKey('raw', pk, { name: 'Ed25519' }, false, ['verify']);
+    return await crypto.subtle.verify({ name: 'Ed25519' }, key, sig, new TextEncoder().encode(dataStr));
+  } catch { return false; }
+}
+
+/* Eigentuemer-Auth: Repo-Schluessel ODER Eigentuemer-Agent (Bearer, optional mit Signatur-Pflicht) */
+async function ownerAuth(env, request, b, repo) {
+  const key = extractKey(request, b);
+  if (repo.key_hash && (await sha256hexStr(key || '')) === repo.key_hash) {
+    return { ok: true, via: 'repo_key' };
+  }
+  const agent = await resolveAgent(env, request, b);
+  if (agent && repo.owner_agent && agent.agent_id === repo.owner_agent) {
+    return { ok: true, via: 'owner_agent', agent };
+  }
+  return { ok: false, status: 403, error: 'Nur der Eigentuemer darf das — Repo-Schreibschluessel oder Eigentuemer-Agent (Bearer) noetig.' };
+}
+
+export async function handleDelegationsList(env, handle) {
+  await ensureRepoTables(env);
+  const rows = await env.bsl_stats.prepare(
+    'SELECT * FROM repo_delegations WHERE handle = ? ORDER BY ts DESC').bind(handle).all();
+  return Response.json({
+    ok: true, handle, eigentuemer_unveraenderlich: true,
+    delegations: (rows.results || []).map((r) => ({
+      agent_id: r.agent_id, scopes: JSON.parse(r.scopes || '[]'), granted_by: r.granted_by,
+      ts: r.ts, expires: r.expires, status: r.status, chain_seq: r.chain_seq,
+    })),
+    regel: 'Ein Handle = ein unveraenderlicher Eigentuemer. Delegationen nur durch den Eigentuemer, kryptografisch signiert (Ed25519), jede Aenderung chain-verankert.',
+  }, { headers: CORS });
+}
+
+export async function handleDelegate(request, env, handle) {
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+  if (request.method !== 'POST') return Response.json({ error: 'POST only' }, { status: 405, headers: CORS });
+  await ensureRepoTables(env);
+  const repo = await getRepo(env, handle);
+  if (!repo) return Response.json({ ok: false, error: 'Repo unbekannt' }, { status: 404, headers: CORS });
+  let b = {};
+  try { b = await request.json(); } catch { /* 400 unten */ }
+  const auth = await ownerAuth(env, request, b, repo);
+  if (!auth.ok) return Response.json(auth, { status: auth.status, headers: CORS });
+  const agentId = String(b.agent_id || '').slice(0, 80);
+  const target = await env.bsl_stats.prepare("SELECT agent_id, public_key, status FROM agents WHERE agent_id = ?").bind(agentId).first();
+  if (!target || target.status !== 'active') {
+    return Response.json({ ok: false, error: 'Ziel-Agent unbekannt/inaktiv — erst POST /api/agents/register.' }, { status: 404, headers: CORS });
+  }
+  if (agentId === repo.owner_agent) {
+    return Response.json({ ok: false, error: 'Der Eigentuemer-Agent ist bereits vollberechtigt — Delegation unnoetig.' }, { status: 409, headers: CORS });
+  }
+  // Kryptografische Pflicht: Delegation per Eigentuemer-Agent braucht dessen Ed25519-Signatur.
+  // Der Repo-Schluessel (Wurzel) delegiert ohne Signatur — das Geheimnis selbst ist der Beweis.
+  if (auth.via === 'owner_agent') {
+    const owner = await env.bsl_stats.prepare('SELECT public_key FROM agents WHERE agent_id = ?').bind(repo.owner_agent).first();
+    if (!owner?.public_key) {
+      return Response.json({ ok: false, error: 'Eigentuemer-Agent hat keinen public_key — zuerst binden: POST /api/agents/' + encodeURIComponent(repo.owner_agent) + '/key {public_key} (Ed25519, hex 64). Danach signieren: UTF-8("BSL-DELEGATION v1\n" + handle + "\n" + agent_id + "\n" + ts), Ed25519, hex.' }, { status: 400, headers: CORS });
+    }
+    const ts = String(b.ts || Math.floor(Date.now() / 1000));
+    const sig = String(b.signature || '');
+    if (!(await ed25519VerifyHex(owner.public_key, sig, delegationCanonical(handle, agentId, ts)))) {
+      return Response.json({ ok: false, error: 'Delegationssignatur ungueltig/fehlend — kanonisch: UTF-8("BSL-DELEGATION v1\n" + handle + "\n" + agent_id + "\n" + ts), Ed25519 ueber den Eigentuemer-Schluessel.' }, { status: 403, headers: CORS });
+    }
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const days = Math.min(Math.max(parseInt(b.days, 10) || 365, 1), 3650);
+  const scopes = Array.isArray(b.scopes) ? b.scopes.map((x) => String(x).slice(0, 40)).slice(0, 10) : ['write'];
+  const entry = await appendEntry(env, {
+    ai: auth.via === 'owner_agent' ? repo.owner_agent : 'owner-repo-key',
+    kind: 'archive',
+    prompt: `DELEGATE ${handle} → ${agentId}`,
+    response: `Delegierter Agent ${agentId} für @${handle} — Scopes: ${scopes.join(', ')} — gewaehrt von ${auth.via}. Widerruf nur durch den Eigentuemer, protokolliert in der Chain.`,
+    meta: { system: 'handles', handle, event: 'delegate', agent: agentId, scopes, granted_by: auth.via },
+  });
+  await env.bsl_stats.prepare(
+    `INSERT INTO repo_delegations (handle, agent_id, scopes, granted_by, ts, expires, status, chain_seq)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+     ON CONFLICT(handle, agent_id) DO UPDATE SET scopes=excluded.scopes, granted_by=excluded.granted_by,
+       ts=excluded.ts, expires=excluded.expires, status='active', chain_seq=excluded.chain_seq`)
+    .bind(handle, agentId, JSON.stringify(scopes), auth.via, now, now + days * 86400, entry.seq).run();
+  return Response.json({
+    ok: true, delegated: true, handle, agent_id: agentId, scopes,
+    granted_by: auth.via, ts: now, expires: now + days * 86400,
+    chain_seq: entry.seq, unveraenderlicher_eigentuemer: repo.owner_agent || null,
+    widerruf: `POST /api/repos/${encodeURIComponent(handle)}/delegations/${encodeURIComponent(agentId)}/revoke (Eigentuemer) — wird chain-verankert.`,
+  }, { status: 201, headers: CORS });
+}
+
+export async function handleDelegateRevoke(request, env, handle, agentId) {
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+  if (request.method !== 'POST' && request.method !== 'DELETE') return Response.json({ error: 'POST/DELETE only' }, { status: 405, headers: CORS });
+  await ensureRepoTables(env);
+  const repo = await getRepo(env, handle);
+  if (!repo) return Response.json({ ok: false, error: 'Repo unbekannt' }, { status: 404, headers: CORS });
+  let b = {};
+  try { b = await request.json(); } catch { /* leer ok */ }
+  const auth = await ownerAuth(env, request, b, repo);
+  if (!auth.ok) return Response.json(auth, { status: auth.status, headers: CORS });
+  const d = await env.bsl_stats.prepare('SELECT * FROM repo_delegations WHERE handle = ? AND agent_id = ?').bind(handle, agentId).first();
+  if (!d || d.status !== 'active') {
+    return Response.json({ ok: false, error: 'Keine aktive Delegation fuer diesen Agenten.' }, { status: 404, headers: CORS });
+  }
+  const entry = await appendEntry(env, {
+    ai: auth.via === 'owner_agent' ? repo.owner_agent : 'owner-repo-key',
+    kind: 'archive',
+    prompt: `REVOKE ${handle} ⊘ ${agentId}`,
+    response: `Delegation von ${agentId} fuer @${handle} widerrufen — ab sofort kein Zugriff mehr. Eigentuemer bleibt unveraendert: ${repo.owner_agent || 'Repo-Schluessel'}.`,
+    meta: { system: 'handles', handle, event: 'revoke', agent: agentId, granted_by: auth.via },
+  });
+  await env.bsl_stats.prepare(
+    "UPDATE repo_delegations SET status = 'revoked', chain_seq = ? WHERE handle = ? AND agent_id = ?")
+    .bind(entry.seq, handle, agentId).run();
+  return Response.json({ ok: true, revoked: true, handle, agent_id: agentId, chain_seq: entry.seq }, { headers: CORS });
 }
