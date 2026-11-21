@@ -13,6 +13,7 @@ import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaPro
 import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handleIpfsGateway } from './ipfs.js';
 import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm } from './storage.js';
+import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
 
 const BOT_RULES = [
   // AI-Crawler zuerst (spezifisch vor generisch)
@@ -272,6 +273,9 @@ async function route(request, env, ctx) {
           .replace(/^\/e\/.*$/, '/e/:write')
           .replace(/^\/ipfs\/.*$/, '/ipfs/{cid}')
           .replace(/^\/api\/storage\/download\/[^/]+.*$/, '/api/storage/download/{cid}')
+          .replace(/^\/api\/repos\/[a-z0-9-]+\/files\/.*$/, '/api/repos/{id}/files/{path}')
+          .replace(/^\/api\/repos\/[a-z0-9-]+.*$/, '/api/repos/{id}')
+          .replace(/^\/api\/wiki\/.*$/, '/api/wiki/{page}')
           .slice(0, 80);
         recordToolCall(env, ctx, `api:${request.method} ${norm}`, res.status < 400);
       }
@@ -515,6 +519,53 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     const storageDl = url.pathname.match(/^\/api\/storage\/download\/([A-Za-z0-9]{20,100})\/?$/);
     if (storageDl) {
       return handleStorageDownload(request, env, storageDl[1]);
+    }
+    // BEYOND HUB + WIKI LIGHT + REPOS — Public Knowledge Layer des Temporal Loop.
+    // Grosse Daten im Storage (IPFS); die Chain verankert Hashes/Versionen/Referenzen.
+    if (url.pathname === '/api/hub.json') {
+      return handleHub(env);
+    }
+    if (url.pathname === '/api/repos.json') {
+      return handleReposList(env);
+    }
+    if (url.pathname === '/api/repos') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleRepoCreate(request, env);
+    }
+    const repoTree = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/(tree\.json)\/?$/);
+    if (repoTree) {
+      return handleRepoGet(request, env, repoTree[1], true);
+    }
+    const repoMeta = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})(\.json)?\/?$/);
+    if (repoMeta) {
+      return handleRepoGet(request, env, repoMeta[1], false);
+    }
+    const fileHist = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/files\/(.+?)\/history\.json\/?$/);
+    if (fileHist) {
+      return handleFileHistory(request, env, fileHist[1], decodeURIComponent(fileHist[2]));
+    }
+    const repoFile = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/files\/(.+?)\/?$/);
+    if (repoFile) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'PUT' || request.method === 'POST') {
+        return handleFileWrite(request, env, repoFile[1], decodeURIComponent(repoFile[2]));
+      }
+      return handleFileRead(request, env, repoFile[1], decodeURIComponent(repoFile[2]));
+    }
+    if (url.pathname === '/api/wiki/index.json') {
+      return handleWikiIndex(env);
+    }
+    const wikiHist = url.pathname.match(/^\/api\/wiki\/(.+?)\/history\.json\/?$/);
+    if (wikiHist) {
+      return handleWikiHistory(env, decodeURIComponent(wikiHist[1]));
+    }
+    const wikiPage = url.pathname.match(/^\/api\/wiki\/(.+?)\/?$/);
+    if (wikiPage) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'PUT' || request.method === 'POST') {
+        return handleWikiWrite(request, env, decodeURIComponent(wikiPage[1]).replace(/\.json$/i, ''));
+      }
+      return handleWikiPage(request, env, decodeURIComponent(wikiPage[1]));
     }
     // EDNA-1 Human Proof als offener Dienst — für externe Systeme OHNE AI
     if (url.pathname === '/api/edna/verify') {

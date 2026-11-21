@@ -76,6 +76,30 @@ export async function handleStorageUpload(request, env) {
   if (!bytes.length || bytes.length > MAX_FILE) {
     return Response.json({ ok: false, error: `Datei leer oder groesser als ${MAX_FILE / 1048576} MB` }, { status: 413, headers: CORS });
   }
+  const name = String(b.name || 'datei').slice(0, 180).replace(/[\r\n/\\]/g, '_');
+  const mime = String(b.mime || 'application/octet-stream').slice(0, 100);
+  const uploader = String(b.uploader || 'anonymous').slice(0, 80);
+  const stored = await storeBytes(env, bytes, { name, mime, uploader });
+  if (!stored.ok) {
+    return Response.json(
+      { ok: false, error: stored.error, ...(stored.detail ? { detail: stored.detail } : {}) },
+      { status: stored.status || 500, headers: CORS });
+  }
+  return Response.json({
+    ok: true, cid: stored.cid, size: bytes.length, sha256: stored.sha256, name, mime,
+    ...(stored.deduped ? { deduped: true } : {}),
+    pinned_local: stored.pinned_local,
+    ...(stored.deduped ? {} : { hinweis: 'Sofort weltweit abrufbar; unser eigener Kubo-Knoten spiegelt die Datei innert Minuten physisch (pinned_local). Integritaet: Bytes → SHA-256 nachrechnen.' }),
+    download: `https://satoshi-interface.com/api/storage/download/${stored.cid}`,
+    gateways: gateways(stored.cid, name),
+  }, { headers: CORS });
+}
+
+/* Interner Helfer: Bytes content-addressiert ablegen — Schutzkappen, Dedupe,
+   Pinata-Eingang, storage_files-Eintrag. Wird auch vom Repo-Layer (repos.js)
+   benutzt. Rueckgabe: {ok:true, cid, sha256, size, deduped, pinned_local}
+   oder {ok:false, status, error, detail?}. */
+export async function storeBytes(env, bytes, { name = 'datei', mime = 'application/octet-stream', uploader = 'anonymous' } = {}) {
   await ensureStorageTable(env);
 
   // Schutzkappen (Missbrauch) — der eigene Knoten selbst hat kein Software-Limit.
@@ -85,24 +109,16 @@ export async function handleStorageUpload(request, env) {
             COALESCE(SUM(CASE WHEN created_at >= ? THEN size ELSE 0 END),0) AS today
      FROM storage_files`).bind(dayStart).first();
   if ((usage?.total || 0) + bytes.length > TOTAL_CAP || (usage?.today || 0) + bytes.length > DAY_CAP) {
-    return Response.json({ ok: false, error: 'Tages-/Gesamtkapazitaet des Gratis-Speichers erreicht — morgen wieder frei' }, { status: 429, headers: CORS });
+    return { ok: false, status: 429, error: 'Tages-/Gesamtkapazitaet des Gratis-Speichers erreicht — morgen wieder frei' };
   }
 
-  const name = String(b.name || 'datei').slice(0, 180).replace(/[\r\n/\\]/g, '_');
-  const mime = String(b.mime || 'application/octet-stream').slice(0, 100);
-  const uploader = String(b.uploader || 'anonymous').slice(0, 80);
   const sha256 = await sha256hex(bytes);
 
   // Dedupe: dieselben Bytes schon da? → bestehende CID zurueck (content-addressiert).
   const dup = await env.bsl_stats.prepare(
     'SELECT cid, pinned_local FROM storage_files WHERE sha256 = ? AND size = ?').bind(sha256, bytes.length).first();
   if (dup) {
-    return Response.json({
-      ok: true, cid: dup.cid, deduped: true, size: bytes.length, sha256, name,
-      pinned_local: !!dup.pinned_local,
-      download: `https://satoshi-interface.com/api/storage/download/${dup.cid}`,
-      gateways: gateways(dup.cid, name),
-    }, { headers: CORS });
+    return { ok: true, cid: dup.cid, sha256, size: bytes.length, deduped: true, pinned_local: !!dup.pinned_local };
   }
 
   // Eingang ueber Pinata (weltweit sofort abrufbar); eigener Kubo spiegelt nach.
@@ -116,10 +132,10 @@ export async function handleStorageUpload(request, env) {
   });
   if (!up.ok) {
     const detail = (await up.text()).slice(0, 200);
-    return Response.json({ ok: false, error: `IPFS-Eingang fehlgeschlagen (${up.status})`, detail }, { status: 502, headers: CORS });
+    return { ok: false, status: 502, error: `IPFS-Eingang fehlgeschlagen (${up.status})`, detail };
   }
   const cid = String((await up.json().catch(() => ({}))).IpfsHash || '');
-  if (!cid) return Response.json({ ok: false, error: 'IPFS-Eingang ohne CID' }, { status: 502, headers: CORS });
+  if (!cid) return { ok: false, status: 502, error: 'IPFS-Eingang ohne CID' };
 
   await env.bsl_stats.prepare(
     `INSERT INTO storage_files (cid, name, size, mime, sha256, uploader, created_at, pinata, pinned_local)
@@ -127,16 +143,10 @@ export async function handleStorageUpload(request, env) {
     .bind(cid, name, bytes.length, mime, sha256, uploader, Math.floor(Date.now() / 1000))
     .run();
 
-  return Response.json({
-    ok: true, cid, size: bytes.length, sha256, name, mime,
-    pinned_local: false,
-    hinweis: 'Sofort weltweit abrufbar; unser eigener Kubo-Knoten spiegelt die Datei innert Minuten physisch (pinned_local). Integritaet: Bytes → SHA-256 nachrechnen.',
-    download: `https://satoshi-interface.com/api/storage/download/${cid}`,
-    gateways: gateways(cid, name),
-  }, { headers: CORS });
+  return { ok: true, cid, sha256, size: bytes.length, deduped: false, pinned_local: false };
 }
 
-function gateways(cid, name) {
+export function gateways(cid, name) {
   const p = name ? `/${encodeURIComponent(name)}` : '';
   return [
     `https://satoshi-interface.com/api/storage/download/${cid}`,

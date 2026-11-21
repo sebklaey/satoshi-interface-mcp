@@ -124,7 +124,7 @@ function classifyTopic(text) {
 const ALL_TOPICS = [...TOPICS.map(([t]) => t), 'dialog'];
 
 /* ---------- Gemeinsame Append-Logik (POST + GET) ---------- */
-async function appendEntry(env, { ai, prompt, response, kind = 'dialog', horizon = null, meta = null }) {
+export async function appendEntry(env, { ai, prompt, response, kind = 'dialog', horizon = null, meta = null }) {
   await ensureTable(env);
   const wallet = getWallet(env);
   const ts = Math.floor(Date.now() / 1000);
