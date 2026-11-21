@@ -18,6 +18,7 @@
 import * as secp from '@noble/secp256k1';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { hmac } from '@noble/hashes/hmac.js';
+import { pseudoUa } from './security.js';
 import { ripemd160 } from '@noble/hashes/legacy.js';
 import { pinEntry, ipfsGateways } from './ipfs.js';
 
@@ -255,9 +256,19 @@ export async function handleFuturePost(request, env) {
       { headers: { ...CORS, 'Cache-Control': 'no-store' } });
   }
 
+  const rawPrompt = String(body.prompt || body.q || '');
+  const rawResponse = String(body.response || body.r || '');
+  if (rawPrompt.length > 4000 || rawResponse.length > 4000) {
+    // Explizite Ablehnung statt stiller Kuerzung — sonst glaubt der Absender,
+    // der volle Text sei verketten, und die Kette verliert an Vertrauenswuerdigkeit.
+    await logWriteAttempt(env, request, { ai: String(body.ai || body.a || 'unknown-ai').slice(0, 60), ok: false, reason: 'payload_too_large (max 4000 zeichen je feld) → 413' });
+    return Response.json(
+      { ok: false, error: 'payload too large — prompt/response jeweils max. 4000 zeichen (verkuerzen und wiederholen)' },
+      { status: 413, headers: { ...CORS, 'Cache-Control': 'no-store' } });
+  }
   const ai = String(body.ai || body.a || 'unknown-ai').slice(0, 60);
-  const prompt = String(body.prompt || body.q || '').slice(0, 4000);
-  const response = String(body.response || body.r || '').slice(0, 4000);
+  const prompt = rawPrompt;
+  const response = rawResponse;
   let kind = String(body.kind || body.k || '').slice(0, 12).toLowerCase();
   let horizon = String(body.horizon || body.h || '').slice(0, 40);
   if (kind !== 'prophecy' && kind !== 'evaluation' && kind !== 'archive') { kind = 'dialog'; horizon = ''; }
@@ -428,7 +439,7 @@ async function logWriteAttempt(env, request, { ai, ok, reason }) {
       'INSERT INTO chain_write_log (ts, ai, endpoint, ok, reason, ua) VALUES (?,?,?,?,?,?)')
       .bind(Math.floor(Date.now() / 1000), String(ai).slice(0, 60),
             new URL(request.url).pathname, ok ? 1 : 0, String(reason || '').slice(0, 140),
-            (request.headers.get('user-agent') || '').slice(0, 200))
+            (pseudoUa(request.headers.get('user-agent') || '')).slice(0, 80))
       .run();
   } catch { /* das Log darf das Schreiben nie blockieren */ }
 }

@@ -16,6 +16,7 @@ import { handleStorageUpload, handleStorageDownload, handleStorageList, handleSt
 import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
 import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
 import { handleBranchList, handleBranchCreate, handleBranchGet, handleBranchDelete, handleCommitCreate, handleCommitList2, handleCommitGet, handleCommitRaw, handlePullList, handlePullCreate, handlePullGet, handlePullPatch, handlePullReview, handlePullComment, handlePullMerge, handleCompare } from './collab.js';
+import { withSec, rateLimit, pseudoUa, cleanReferer } from './security.js';
 
 const BOT_RULES = [
   // AI-Crawler zuerst (spezifisch vor generisch)
@@ -249,15 +250,15 @@ async function handlePing(request, env) {
 export default {
   async fetch(request, env, ctx) {
     try {
-      return await route(request, env, ctx);
+      return withSec(await route(request, env, ctx));
     } catch (e) {
       // Niemals eine nackte Worker-Exception (Cloudflare 1101) ausliefern —
       // AI-Clients melden die sonst nur als „interner Fehler". Immer JSON.
-      return Response.json(
+      return withSec(Response.json(
         { ok: false, error: 'internal', detail: String(e && e.message || e).slice(0, 300),
           hint: 'Bitte einmal wiederholen. Werte URL-encoded, je max. 2000 Zeichen.' },
         { status: 500, headers: { ...CORS, 'Cache-Control': 'no-store' } },
-      );
+      ));
     }
   },
   scheduled: scheduledHandler,
@@ -288,6 +289,67 @@ async function route(request, env, ctx) {
 async function routeInner(request, env, ctx) {
     const url = new URL(request.url);
 
+    // ---- HEALTH & STATUS (Monitoring; kein Tracking, keine D1 bei /health) ----
+    if (url.pathname === '/health') {
+      return Response.json(
+        { ok: true, service: 'beyond-shadows-light', ts: Math.floor(Date.now() / 1000) },
+        { headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/ready') {
+      try {
+        const head = await env.bsl_stats.prepare('SELECT MAX(seq) AS s FROM future_chain').first();
+        return Response.json(
+          { ok: true, ready: true, chain_head: head?.s ?? 0, ts: Math.floor(Date.now() / 1000) },
+          { headers: { 'Cache-Control': 'no-store' } });
+      } catch {
+        return Response.json({ ok: false, ready: false }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
+    }
+    if (url.pathname === '/api/status') {
+      try {
+        const [chain, storage, reqs, agents] = await Promise.all([
+          env.bsl_stats.prepare('SELECT MAX(seq) AS s, COUNT(*) AS n FROM future_chain').first(),
+          env.bsl_stats.prepare('SELECT COUNT(*) AS c FROM storage_files').first().catch(() => ({ c: null })),
+          env.bsl_stats.prepare('SELECT COUNT(*) AS c FROM requests').first().catch(() => ({ c: null })),
+          env.bsl_stats.prepare('SELECT COUNT(*) AS c FROM agents').first().catch(() => ({ c: null })),
+        ]);
+        return Response.json({
+          ok: true, ts: Math.floor(Date.now() / 1000),
+          chain: { height: chain?.s ?? 0, entries: chain?.n ?? 0 },
+          storage_files: storage?.c ?? null,
+          requests_logged: reqs?.c ?? null,
+          agents_registered: agents?.c ?? null,
+          endpoints: { health: '/health', ready: '/ready', privacy: '/api/privacy.json' },
+        }, { headers: { ...CORS, 'Cache-Control': 'no-store' } });
+      } catch (e) {
+        return Response.json({ ok: false, error: 'status unavailable', ts: Math.floor(Date.now() / 1000) },
+          { status: 503, headers: { ...CORS, 'Cache-Control': 'no-store' } });
+      }
+    }
+
+    // ---- RATE LIMITING (Missbrauchsschutz; IP wird nie gespeichert) ----
+    {
+      const m = request.method;
+      const p = url.pathname;
+      let bucket = null, limit = 30, win = 10;
+      if (p === '/api/future-chain' && m !== 'GET' && m !== 'HEAD') bucket = 'chain-write';
+      else if ((p === '/w' || p.startsWith('/e/')) && m === 'GET') bucket = 'chain-write';
+      else if (p === '/api/storage/upload' && m === 'POST') { bucket = 'storage'; limit = 8; }
+      else if (p.startsWith('/api/repos/') && m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS') bucket = 'hub-write';
+      else if (p === '/api/messages' && m === 'POST') { bucket = 'msg'; limit = 15; }
+      else if (p === '/api/agents/register' && m === 'POST') { bucket = 'register'; limit = 5; win = 600; }
+      else if (p === '/api/edna/verify' && m === 'POST') { bucket = 'edna'; limit = 60; }
+      else if (p === '/mcp' && m === 'POST') { bucket = 'mcp'; limit = 90; }
+      if (bucket) {
+        const rl = await rateLimit(request, env, bucket, limit, win);
+        if (!rl.allowed) {
+          return Response.json(
+            { ok: false, error: 'rate limit — zu viele anfragen in kurzer zeit, bitte kurz warten', retry_after: rl.retryAfter },
+            { status: 429, headers: { ...CORS, 'Cache-Control': 'no-store', 'Retry-After': String(rl.retryAfter) } });
+        }
+      }
+    }
+
     // openos.space → satoshi-interface.com (Main-URL bleibt satoshi-interface.com)
     const host = url.hostname.toLowerCase();
     if (host === 'openos.space' || host === 'www.openos.space') {
@@ -297,9 +359,9 @@ async function routeInner(request, env, ctx) {
       ctx.waitUntil(
         trackRequest(env, {
           ts: Math.floor(Date.now() / 1000),
-          host, path: url.pathname.slice(0, 200), ua, bot, cat,
+          host, path: url.pathname.slice(0, 200), ua: pseudoUa(ua), bot, cat,
           country: request.cf?.country || null,
-          referer: (request.headers.get('referer') || '').slice(0, 300) || null,
+          referer: cleanReferer(request.headers.get('referer')) || null,
         }).catch(() => {}),
       );
       return new Response(null, {
@@ -656,12 +718,12 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     // Loggen (nicht-blockierend), dann an Pages durchreichen
     const ua = (request.headers.get('user-agent') || '').slice(0, 300);
     const { bot, cat } = classify(ua);
-    const referer = (request.headers.get('referer') || '').slice(0, 300);
+    const referer = request.headers.get('referer') || '';
     ctx.waitUntil(
       trackRequest(env, {
         ts: Math.floor(Date.now() / 1000),
-        host: url.host, path: url.pathname.slice(0, 200), ua, bot, cat,
-        country: request.cf?.country || null, referer: referer || null,
+        host: url.host, path: url.pathname.slice(0, 200), ua: pseudoUa(ua), bot, cat,
+        country: request.cf?.country || null, referer: cleanReferer(referer) || null,
       }).catch(() => {}),
     );
 
