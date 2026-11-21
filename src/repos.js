@@ -48,6 +48,8 @@ function ensureRepoTables(env) {
            key_hash TEXT,
            open_write INTEGER NOT NULL DEFAULT 0,
            created_at INTEGER NOT NULL)`).run();
+      try { await env.bsl_stats.prepare('ALTER TABLE repos ADD COLUMN owner_agent TEXT').run(); } catch { /* Spalte existiert */ }
+      try { await env.bsl_stats.prepare('ALTER TABLE repos ADD COLUMN handle_claim_seq INTEGER').run(); } catch { /* Spalte existiert */ }
       await env.bsl_stats.prepare(
         `CREATE TABLE IF NOT EXISTS repo_files (
            repo TEXT NOT NULL,
@@ -108,12 +110,49 @@ async function getRepo(env, id) {
   return env.bsl_stats.prepare('SELECT * FROM repos WHERE id = ?').bind(id).first();
 }
 
-async function canWrite(repo, key) {
+async function canWrite(repo, key, agentId = null) {
   if (repo.open_write) return true;
+  // AI-Account-Verbund: der registrierte Agent des Owners darf ebenfalls schreiben
+  if (repo.owner_agent && agentId && agentId === repo.owner_agent) return true;
   if (!repo.key_hash) return true;              // kein Schluessel hinterlegt = offen
   if (!key) return false;
   return (await sha256hexStr(key)) === repo.key_hash;
 }
+
+/* AI-Account aufloesen: Authorization: Bearer <agent_api_key> (oder body.agent_api_key)
+   → Agent aus dem Open-AI-Network-Register. Liefert { agent_id, ... } oder null. */
+async function resolveAgent(env, request, body) {
+  const h = request.headers.get('authorization') || '';
+  const bearer = h.toLowerCase().startsWith('bearer ') ? h.slice(7).trim() : '';
+  const raw = bearer || (body && typeof body.agent_api_key === 'string' ? body.agent_api_key.trim() : '');
+  if (!raw) return null;
+  const hash = await sha256hexStr(raw);
+  const a = await env.bsl_stats.prepare(
+    "SELECT agent_id, display_name, provider FROM agents WHERE api_key_hash = ? AND status = 'active'").bind(hash).first();
+  return a || null;
+}
+
+/* EDNA Human-Verifikation: feel/session → edna_humans (Fenster 7 Tage). */
+async function ednaHumanVerified(env, b) {
+  const feel = String(b.feel || '').slice(0, 16);
+  const session = String(b.session || '').slice(0, 64);
+  if (!feel && !session) return null;
+  let sess = session;
+  if (feel) {
+    const row = await env.bsl_stats.prepare(
+      'SELECT session FROM sensoric WHERE feel = ? ORDER BY ts DESC LIMIT 1').bind(feel).first();
+    if (row) sess = row.session;
+  }
+  if (!sess) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const h = await env.bsl_stats.prepare(
+    'SELECT session, first_ts, last_ts, max_pc FROM edna_humans WHERE session = ?').bind(sess).first();
+  if (!h || now - h.last_ts > 7 * 86400) return null;
+  return { session: sess, first_ts: h.first_ts, last_ts: h.last_ts, max_pc: h.max_pc };
+}
+
+/* Reservierte Handles — Claim nur mit Claim-Passwort (+ EDNA + AI-Account). */
+const RESERVED_HANDLES = { satoshi: 'HANDLE_PASSWORD_SATOSHI' };
 
 async function canRead(repo, key) {
   if (repo.visibility === 'public') return true;
@@ -225,7 +264,7 @@ export async function handleReposList(env) {
 export async function handleRepoCreate(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
   if (request.method !== 'POST') {
-    return Response.json({ error: 'POST only — JSON {id, name?, description?, visibility?, owner?, open_write?}' }, { status: 405, headers: CORS });
+    return Response.json({ error: 'POST only — JSON {id, name?, description?, visibility?, owner?, open_write?, feel?|session?, agent_id?, claim_password?}' }, { status: 405, headers: CORS });
   }
   await ensureRepoTables(env);
   let b = {};
@@ -238,24 +277,78 @@ export async function handleRepoCreate(request, env) {
     return Response.json({ ok: false, error: 'wiki ist das System-Repo (WIKI LIGHT)' }, { status: 409, headers: CORS });
   }
   if (await getRepo(env, id)) {
-    return Response.json({ ok: false, error: 'Repo existiert bereits' }, { status: 409, headers: CORS });
+    return Response.json({ ok: false, error: 'Handle ist bereits vergeben — Handles sind einmalig, unveraenderlich und chain-verankert.' }, { status: 409, headers: CORS });
   }
+
+  // 1) EDNA HUMAN-VERIFIED ist Pflicht fuer jedes Handle
+  const edna = await ednaHumanVerified(env, b);
+  if (!edna) {
+    return Response.json({
+      ok: false, error: 'Handle-Anlage erfordert EDNA Human-Verifikation (Nachweis, dass ein Mensch am Geraet sitzt).',
+      so_gehts: [
+        '1) In der App /feel oeffnen — die EDNA-1 misst deine Signale (Maus/Touch/Dauer).',
+        '2) Nach der Messung den FEEL-Schluessel (FEEL-XXXXXX) oder die Session kopieren.',
+        '3) Erneut POST /api/repos {id, feel: "FEEL-XXXXXX"} bzw. {session: "…"} senden.',
+      ],
+      pruefen: 'GET /api/edna/proof?feel=FEEL-XXXXXX — Gueltigkeitsfenster: 7 Tage nach Verifikation.',
+    }, { status: 428, headers: CORS });
+  }
+
+  // 2) Reservierte Handles (z. B. "satoshi") — Claim-Passwort noetig
+  const pwKey = RESERVED_HANDLES[id];
+  if (pwKey) {
+    const want = env[pwKey] || (id === 'satoshi' ? '54197542' : '');
+    if (String(b.claim_password || '') !== want) {
+      return Response.json({ ok: false, error: `Handle "${id}" ist reserviert — claim_password erforderlich (Claim durch den Berechtigten, EDNA-verified + AI-Account).` }, { status: 403, headers: CORS });
+    }
+  }
+
+  // 3) AI-Account-Verbindung (optional, aber noetig damit die AI des Users auf
+  //    Presence/Hub/Storage/Wiki-Daten zugreifen kann): agent_id + Bearer agent_api_key
+  const agent = await resolveAgent(env, request, b);
+  let ownerAgent = null;
+  if (b.agent_id) {
+    if (!agent || agent.agent_id !== String(b.agent_id).slice(0, 80)) {
+      return Response.json({ ok: false, error: 'agent_id-Verbindung gescheitert — Authorization: Bearer <agent_api_key> des registrierten Agenten noetig (POST /api/agents/register).' }, { status: 403, headers: CORS });
+    }
+    ownerAgent = agent.agent_id;
+  } else if (agent) {
+    ownerAgent = agent.agent_id;
+  }
+
   const visibility = b.visibility === 'private' ? 'private' : 'public';
   const openWrite = b.open_write === true && visibility === 'public';
   const writeKey = openWrite ? null : (typeof b.api_key === 'string' && b.api_key.length >= 12 ? b.api_key : randKey());
   const keyHash = writeKey ? await sha256hexStr(writeKey) : null;
   await env.bsl_stats.prepare(
-    `INSERT INTO repos (id, name, description, visibility, owner, key_hash, open_write, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    `INSERT INTO repos (id, name, description, visibility, owner, key_hash, open_write, created_at, owner_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, String(b.name || id).slice(0, 120), String(b.description || '').slice(0, 500),
       visibility, String(b.owner || 'anonymous').slice(0, 80), keyHash, openWrite ? 1 : 0,
-      Math.floor(Date.now() / 1000)).run();
+      Math.floor(Date.now() / 1000), ownerAgent).run();
+
+  // 4) Kryptografische Verankerung des Handle-Claims in der Hash-Chain:
+  //    Belegungszeitpunkt + Reihenfolge sind damit oeffentlich nachpruefbar und
+  //    nachtraeglich unveraenderbar (ehrlich: Identitaet bleibt am Repo-Schluessel/Agent haengen).
+  const claim = await appendEntry(env, {
+    ai: ownerAgent || 'human-edna',
+    kind: 'archive',
+    prompt: `HANDLE-CLAIM ${id}`,
+    response: `Handle "${id}" vergeben — EDNA human-verified (session …${String(edna.session).slice(-8)}, first_ts ${edna.first_ts})` +
+      (ownerAgent ? `, AI-Account: ${ownerAgent}` : '') + (pwKey ? ', reserviert (Claim-Passwort)' : '') +
+      ' — einmalig, unveraenderlich.',
+    meta: { system: 'handles', handle: id, owner_agent: ownerAgent || null, edna_first_ts: edna.first_ts, reserved: !!pwKey },
+  });
+
   return Response.json({
     ok: true, id, visibility, open_write: openWrite,
+    handle: { unique: true, unchangeable: true, chain_seq: claim.seq, chain_hash: claim.entry_hash },
     ...(writeKey ? { write_key: writeKey, hinweis: 'Schreibschluessel — nur jetzt sichtbar. Gespeichert wird nur sein SHA-256.' } : {}),
     ...(visibility === 'private' ? { private_hinweis: 'v0: Inhalt clientseitig verschluesseln — der Server speichert nur Ciphertext.' } : {}),
+    ...(ownerAgent ? { ai_account: ownerAgent, ai_zugriff: 'Diese AI darf als Owner-Agent auf dieses Repo schreiben (Bearer) und die Presence lesen.' } : {}),
     api: `${BASE}/api/repos/${id}.json`,
     write: `PUT ${BASE}/api/repos/${id}/files/{path} (+ x-repo-key)`,
+    publish: `POST ${BASE}/api/repos/${id}/publish — Presence auf Wiki Light veroeffentlichen (presences/${id})`,
     hub: `${BASE}/api/hub.json`,
   }, { status: 201, headers: CORS });
 }
@@ -314,7 +407,7 @@ export async function handleFileWrite(request, env, id, path) {
   let b = {};
   try { b = await request.json(); } catch { /* unten 400 */ }
   const key = extractKey(request, b);
-  if (!(await canWrite(repo, key))) {
+  if (!(await canWrite(repo, key, (await resolveAgent(env, request, b))?.agent_id || null))) {
     return Response.json({ ok: false, error: 'Schreibschluessel fehlt/ungueltig (x-repo-key)' }, { status: 403, headers: CORS });
   }
 
@@ -560,4 +653,131 @@ export async function handleWikiWrite(request, env, page) {
   page = cleanPath(page);
   if (!page) return Response.json({ ok: false, error: 'Seite fehlt' }, { status: 400, headers: CORS });
   return handleFileWrite(request, env, WIKI_REPO, page);
+}
+
+/* DELETE /api/repos/{id}/files/{path} — Datei aus einem Repo entfernen.
+   Autorisation: Schreibschluessel des Repos. Ehrlich: alle Versionen der
+   Datei fallen aus dem Baum; Inhalte bleiben content-addressiert im IPFS
+   (Kubo/Pinata) erhalten — IPFS kann nichts wirklich loeschen. */
+export async function handleFileDelete(request, env, id, path) {
+  if (request.method !== 'DELETE' && request.method !== 'POST') {
+    return Response.json({ error: 'DELETE (oder POST …/delete) only' }, { status: 405, headers: CORS });
+  }
+  await ensureRepoTables(env);
+  const repo = await getRepo(env, id);
+  if (!repo) return Response.json({ ok: false, error: 'Repo unbekannt' }, { status: 404, headers: CORS });
+  path = cleanPath(path);
+  if (!path) return Response.json({ ok: false, error: 'Pfad fehlt/ungueltig' }, { status: 400, headers: CORS });
+  const key = extractKey(request, null);
+  if (!(await canWrite(repo, key, (await resolveAgent(env, request, null))?.agent_id || null))) {
+    return Response.json({ ok: false, error: 'Schreibschluessel fehlt/ungueltig (x-repo-key)' }, { status: 403, headers: CORS });
+  }
+  const latest = await latestVersion(env, id, path);
+  if (!latest) return Response.json({ ok: false, error: 'Datei unbekannt' }, { status: 404, headers: CORS });
+  const ts = Math.floor(Date.now() / 1000);
+  let chainSeq = null;
+  try {
+    const entry = await appendEntry(env, {
+      ai: `repo:${id}`,
+      prompt: `REPO-DELETE ${id}/${path} (bis v${latest.version})`,
+      response: `letzte sha256:${latest.sha256} cid:${latest.cid} bytes:${latest.size} ts:${ts}`,
+      kind: 'archive',
+      meta: { system: 'repos', repo: id, path, event: 'delete', last_version: latest.version, cid: latest.cid, sha256: latest.sha256 },
+    });
+    chainSeq = entry?.seq || null;
+  } catch { chainSeq = null; }
+  await env.bsl_stats.prepare('DELETE FROM repo_files WHERE repo = ? AND path = ?').bind(id, path).run();
+  return Response.json({
+    ok: true, deleted: true, repo: id, path,
+    removed_versions_up_to: latest.version, last_sha256: latest.sha256,
+    chain_seq: chainSeq,
+    hinweis: 'Datei aus dem Repo entfernt (Chain-Anker gesetzt). Ehrlich: die Inhalte bleiben content-addressiert im IPFS erhalten — IPFS kann nichts wirklich loeschen.',
+  }, { headers: CORS });
+}
+
+/* POST /api/repos/{id}/publish — Repo-Inhalt als Wiki-Light-Seite veroeffentlichen.
+   DIE VERÖFFENTLICHUNGS-BRÜCKE: Beyond Hub (Entstehung) → Wiki Light (oeffentlich).
+   Autorisation: Schreibschluessel des QUELL-Repos (Presence = eigene Identität).
+   Quelle: path (Standard presence.md, sonst neueste Datei des Repos).
+   Ziel: Wiki-System-Repo, Seite presences/{id}. Volle Provenienz beidseitig. */
+export async function handleRepoPublish(request, env, id) {
+  if (request.method !== 'POST') return Response.json({ error: 'POST only — {path?, page?} + x-repo-key' }, { status: 405, headers: CORS });
+  await ensureRepoTables(env);
+  const repo = await getRepo(env, id);
+  if (!repo) return Response.json({ ok: false, error: 'Repo unbekannt — Satoshi Social: erst POST /api/repos {id: handle}' }, { status: 404, headers: CORS });
+  let b = {};
+  try { b = await request.json(); } catch { /* leer ok */ }
+  const key = extractKey(request, b);
+  if (!(await canWrite(repo, key, (await resolveAgent(env, request, b))?.agent_id || null))) {
+    return Response.json({ ok: false, error: 'Schreibschluessel fehlt/ungueltig (x-repo-key des Repos — oder als Owner-Agent per Bearer)' }, { status: 403, headers: CORS });
+  }
+  let srcPath = cleanPath(b.path) || 'presence.md';
+  let src = await latestVersion(env, id, srcPath);
+  if (!src) {
+    // Fallback: neueste Datei des Repos
+    const any = await env.bsl_stats.prepare(
+      'SELECT path FROM repo_files WHERE repo = ? ORDER BY ts DESC LIMIT 1').bind(id).first();
+    if (any) { srcPath = any.path; src = await latestVersion(env, id, srcPath); }
+  }
+  if (!src) return Response.json({ ok: false, error: 'Repo ist leer — erst eine Datei schreiben (z. B. presence.md)' }, { status: 409, headers: CORS });
+
+  // Inhalt aus dem IPFS-Speicher holen (der Server speichert keine Inhalte) —
+  // mehrere Gateways versuchen (Pinata limitiert oefters mit 429).
+  const sRow = await env.bsl_stats.prepare('SELECT name, mime FROM storage_files WHERE cid = ?').bind(src.cid).first();
+  const fname = sRow?.name || null;
+  const gwList = [
+    `https://littleking.live/api/storage/download/${src.cid}`,
+    `${PINATA_GW}/${src.cid}${fname ? `/${encodeURIComponent(fname)}` : ''}`,
+    `https://ipfs.io/ipfs/${src.cid}${fname ? `/${encodeURIComponent(fname)}` : ''}`,
+    `https://dweb.link/ipfs/${src.cid}${fname ? `/${encodeURIComponent(fname)}` : ''}`,
+  ];
+  let content = null; let lastErr = '';
+  const gwRound = [
+    ...gwList,
+    `https://gateway.ipfs.io/ipfs/${src.cid}${fname ? `/${encodeURIComponent(fname)}` : ''}`,
+  ];
+  for (let round = 0; round < 3 && content === null; round++) {
+    if (round > 0) await new Promise((r) => setTimeout(r, 8000)); // Gateway-Propagation abwarten
+    for (const gw of gwRound) {
+      try {
+        const r = await fetch(gw, { signal: AbortSignal.timeout(12000), redirect: 'follow' });
+        if (r.ok) { content = await r.text(); break; }
+        lastErr = 'gateway ' + r.status;
+      } catch (e) {
+        lastErr = String(e && e.message || e).slice(0, 80);
+      }
+    }
+  }
+  if (content === null) {
+    return Response.json({ ok: false, error: 'Inhalt nicht aus dem IPFS abrufbar (' + lastErr + ')' }, { status: 502, headers: CORS });
+  }
+  if (repo.visibility === 'private' && /privatsphaere|private|geheim|passwort/i.test(content)) {
+    return Response.json({ ok: false, error: 'Veröffentlichung verweigert: Inhalt sieht nach privaten Daten aus (Stichwort-Check). Private Repos bitte clientseitig verschluesseln, bevor veröffentlicht wird.' }, { status: 409, headers: CORS });
+  }
+  const page = cleanPath(b.page) || `presences/${id}`;
+  // Write in das Wiki-System-Repo — Operator-Seite ueber internen Schluessel
+  const wikiReq = new Request(`${BASE}/api/repos/wiki/files/${encodeURIComponent(page)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-repo-key': env.IPFS_CONFIRM_TOKEN || '' },
+    body: JSON.stringify({
+      content,
+      message: `PUBLISH aus ${id}/${srcPath} v${src.version}`,
+      author: `publish:${id}`,
+    }),
+  });
+  const wikiRes = await handleFileWrite(wikiReq, env, WIKI_REPO, page);
+  const wikiJson = await wikiRes.json().catch(() => ({}));
+  if (!wikiRes.ok || wikiJson.ok === false) {
+    return Response.json({ ok: false, error: 'Wiki-Write fehlgeschlagen', detail: wikiJson.error || wikiRes.status }, { status: 502, headers: CORS });
+  }
+  return Response.json({
+    ok: true, published: true,
+    repo: id, source: { path: srcPath, version: src.version, sha256: src.sha256, cid: src.cid },
+    page,
+    wiki: { version: wikiJson.version, chain_seq: wikiJson.chain_seq, sha256: wikiJson.sha256 },
+    published_url: `${BASE}/wiki?seite=${encodeURIComponent(page)}`,
+    json_url: `${BASE}/api/wiki/${encodeURIComponent(page)}.json`,
+    provenance: `Hub v${src.version} (sha256 ${String(src.sha256).slice(0, 16)}…) → Wiki Light v${wikiJson.version}, signierter Anker #${wikiJson.chain_seq} — Rueckwaerts verifizierbar.`,
+    widerruf: 'Ruecknahme: DELETE /api/repos/wiki/files/' + encodeURIComponent(page) + ' (Operator) — der History-Eintrag bleibt in der Chain.',
+  }, { status: 201, headers: CORS });
 }

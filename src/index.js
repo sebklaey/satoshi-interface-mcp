@@ -12,8 +12,8 @@ import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat,
 import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaProof } from './sensoric.js';
 import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handleIpfsGateway } from './ipfs.js';
-import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm } from './storage.js';
-import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
+import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm, handleStorageDelete } from './storage.js';
+import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleFileDelete, handleRepoPublish, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
 import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
 import { handleDnaPut, handleDnaGet, handleDiscover, handleMatch, handleContact, handleInboxGet, handleContactResolve, handleConnections, handleWebhookLog, handleWebhookLogGet } from './social.js';
 import { handleBranchList, handleBranchCreate, handleBranchGet, handleBranchDelete, handleCommitCreate, handleCommitList2, handleCommitGet, handleCommitRaw, handlePullList, handlePullCreate, handlePullGet, handlePullPatch, handlePullReview, handlePullComment, handlePullMerge, handleCompare } from './collab.js';
@@ -582,6 +582,10 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
       return handleStoragePinnedConfirm(request, env);
     }
+    const storageDel = url.pathname.match(/^\/api\/storage\/delete\/([A-Za-z0-9]{20,100})\/?$/);
+    if (storageDel) {
+      return handleStorageDelete(request, env, storageDel[1]);
+    }
     const storageDl = url.pathname.match(/^\/api\/storage\/download\/([A-Za-z0-9]{20,100})\/?$/);
     if (storageDl) {
       return handleStorageDownload(request, env, storageDl[1]);
@@ -598,6 +602,11 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
       return handleRepoCreate(request, env);
     }
+    const repoPublish = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/publish\/?$/);
+    if (repoPublish) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleRepoPublish(request, env, repoPublish[1]);
+    }
     const repoTree = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/(tree\.json)\/?$/);
     if (repoTree) {
       return handleRepoGet(request, env, repoTree[1], true);
@@ -610,11 +619,18 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     if (fileHist) {
       return handleFileHistory(request, env, fileHist[1], decodeURIComponent(fileHist[2]));
     }
+    const fileDeleteAlias = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/files\/(.+?)\/delete\/?$/);
+    if (fileDeleteAlias && request.method === 'POST') {
+      return handleFileDelete(request, env, fileDeleteAlias[1], decodeURIComponent(fileDeleteAlias[2]));
+    }
     const repoFile = url.pathname.match(/^\/api\/repos\/([a-z0-9-]{3,60})\/files\/(.+?)\/?$/);
     if (repoFile) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
       if (request.method === 'PUT' || request.method === 'POST') {
         return handleFileWrite(request, env, repoFile[1], decodeURIComponent(repoFile[2]));
+      }
+      if (request.method === 'DELETE') {
+        return handleFileDelete(request, env, repoFile[1], decodeURIComponent(repoFile[2]));
       }
       return handleFileRead(request, env, repoFile[1], decodeURIComponent(repoFile[2]));
     }

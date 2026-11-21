@@ -226,3 +226,25 @@ export async function handleStoragePinnedConfirm(request, env) {
   if (!r.meta?.changes) return Response.json({ ok: false, error: 'CID unbekannt' }, { status: 404, headers: CORS });
   return Response.json({ ok: true, cid, pinned_local: true }, { headers: CORS });
 }
+
+/* DELETE /api/storage/delete/{cid} (oder POST) — Eintrag aus dem Verzeichnis
+   entfernen. Ehrlich: IPFS ist content-addressiert — die Pins auf Kubo/Pinata
+   bleiben bestehen (Unpin laeuft beim Betreiber/GC); der Index-Eintrag ist
+   weg, Download liefert danach 404. Ohne Konto = ohne Autorisation: wer die
+   CID kennt, kann sie aus dem Verzeichnis nehmen — der Speicher ist offen. */
+export async function handleStorageDelete(request, env, cid) {
+  if (request.method !== 'DELETE' && request.method !== 'POST') {
+    return Response.json({ error: 'DELETE (oder POST) only' }, { status: 405, headers: CORS });
+  }
+  await ensureStorageTable(env);
+  cid = String(cid || '').slice(0, 100);
+  if (!cid) return Response.json({ ok: false, error: 'cid erforderlich' }, { status: 400, headers: CORS });
+  const row = await env.bsl_stats.prepare(
+    'SELECT cid, name, size, sha256 FROM storage_files WHERE cid = ?').bind(cid).first();
+  if (!row) return Response.json({ ok: false, error: 'CID unbekannt — nicht in diesem Speicher' }, { status: 404, headers: CORS });
+  await env.bsl_stats.prepare('DELETE FROM storage_files WHERE cid = ?').bind(cid).run();
+  return Response.json({
+    ok: true, deleted: true, cid, name: row.name, size: row.size, sha256: row.sha256,
+    hinweis: 'Eintrag aus dem Verzeichnis entfernt — Download liefert ab jetzt 404. Ehrlich: die Pins auf unserem Kubo/Pinata bleiben bestehen (content-addressiert, kein Unpin via API).',
+  }, { headers: CORS });
+}
