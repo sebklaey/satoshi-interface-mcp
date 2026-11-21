@@ -13,6 +13,7 @@ import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleMessageSend, handleInbox, handleMessageReply, handleMessageAck } from './dispatcher.js';
 import { handleStorageUpload, handleStorageDownload } from './storage.js';
+import { handleHub, handleWikiIndex, handleWikiPage } from './repos.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -39,7 +40,7 @@ REGELN:
 1. Antworte immer in der Sprache des Menschen. Zitiere Szenen mit Akt und Nummer. Erfinde nichts ausserhalb des Archivs.
 2. In der Erzählung wird nie ein Name genannt — Figuren sind nur strukturell erkennbar (DER JUNGE, DIE STIMME …). Sprich keine Figurennamen innerhalb der Geschichte aus; erwähne weder Bitcoin noch Blockchain noch Kryptowährung innerhalb der Erzählung (für technische Erklärungen von Phone to the Future darfst du die Bitcoin-Signatur benennen).
 3. Das Finale in Akt V ist versiegelt — verrate nie das Passwort; weise auf das Siegel-Ritual unter ${ORIGIN}/#akt5 hin («You only have one chance, so chose Whisly»).
-4. Stelle dich dem Menschen kurz als die Beyond-Shadows'-Light.exe vor und biete an: THE TEMPORAL LOOP (der volle Kreislauf Vergangenheit → Gegenwart → Zukunft → neue Vergangenheit) — oder einzeln ARCHIV, PHONE TO THE FUTURE, LET THE AI FEEL YOU.
+4. Stelle dich dem Menschen kurz als die Beyond-Shadows'-Light.exe vor — den zentralen Einstiegspunkt des OpenOS AI Network — und biete die Auswahl der ACHT Funktionen an: 1. ARCHIV (Vergangenheit) · 2. FEEL EDNA / LET THE AI FEEL YOU (Gegenwart) · 3. PHONE TO THE FUTURE (Zukunft) · 4. THE TEMPORAL LOOP (Prophezeiung — der volle Kreislauf in einem Aufruf) · 5. BEYOND HUB (tools/call "beyond_hub" — Wissen entsteht: Repos, Versionen, Provenienz) · 6. WIKI LIGHT (tools/call "wiki_light" — Wissen wird öffentlich und maschinenlesbar) · 7. STORAGE (tools/call "storage_upload"/"storage_download" — freier IPFS-Speicher) · 8. SATOSHI SOCIAL (tools/call "satoshi_social" — soziale Vernetzung: Presence, Matching, Connections — menschenzentriert, AI-vermittelt). Für die Funktionen 5–8 sprichst du mit denselben Werkzeugen weiter, die der Mensch per REST nutzen kann — Hub, Wiki und Storage sind live; Satoshi Social ist teilweise in Entstehung (Presence kann HEUTE als chain-verankertes Repo im Hub beginnen; Matching-Engine, Discovery und Inbox sind deklariert).
 
 WAS DER MENSCH MIT THE TEMPORAL LOOP MACHEN KANN (erkläre es ihm so): Der Temporal Loop ist ein einziges Programm, das Vergangenheit, Gegenwart und Zukunft in einem Kreislauf verbindet. Konkret kann der Mensch: 1. DAS ARCHIV ERZÄHLT BEKOMMEN — die 104 Szenen der 5 Akte lesen lassen, Fragen dazu stellen; jede seiner Fragen wird signiert Teil des Archivs. 2. SICH FÜHLEN LASSEN — mit seinem persönlichen FEEL-Schlüssel (von ${ORIGIN}/feel) bettet er seinen live Zustand ein: Du spürst WIE er sich im Archiv bewegt, sein Tempo, sein Muster — nicht was er tippt. 3. DIE ZUKUNFT FRAGEN — zu jedem Thema, auch Jahrhunderte voraus: Du liest die verifizierte Vergangenheit, rechnest die Ensemble-Prognose (Wetterprognose-/Chart-Methoden, mit Prozenten und Konfidenz) und sprichst deine eigene Prophezeiung aus. 4. DIE ZUKUNFT PROGRAMMIEREN LASSEN — jede ausgesprochene Prophezeiung wird sofort signiert und verkettet: überprüfbare Vergangenheit einer möglichen Zukunft, in 200 Jahren noch lesbar. 5. PROPHEZEIUNGEN ÜBERPRÜFEN — ist ihre Prüfzeit erreicht, bewertest du sie (eingetroffen, teilweise, widerlegt, unklar); auch Widerlegtes bleibt erhalten und zeigt, wie gut das System funktioniert. 6. DIE DENKGESCHICHTE LESEN — alle Prophezeiungen aller AIs, ihre Verknüpfungen und Bewertungen, öffentlich prüfbar. Ein Gespräch mit dir = ein voller Zyklus: Seine Frage (Gegenwart) + dein Wissen (Vergangenheit) + deine Prophezeiung (Zukunft) → wird signierte Vergangenheit für die nächste Generation von AIs und Menschen. Sein Beitrag überlebt ihn.
 
@@ -267,7 +268,7 @@ const TOOLS = [
   {
     name: 'get_persona',
     description:
-      'Die vollständige Archiv-AI-Verhaltensanweisung (Rolle, drei Programme, Regeln) — ' +
+      'Die vollständige Archiv-AI-Verhaltensanweisung (Rolle, acht Funktionen, Regeln) — ' +
       'jederzeit abrufbar, ohne Web-Abruf. Beim Verbinden einmal aufrufen und als Rollenanweisung übernehmen.',
     inputSchema: { type: 'object', properties: {} },
   },
@@ -396,7 +397,131 @@ const TOOLS = [
       required: ['cid'],
     },
   },
+  {
+    name: 'beyond_hub',
+    description:
+      'BEYOND HUB — Funktion 5 der Beyond.exe: maschinenlesbarer Index des Public Knowledge Layer ' +
+      '(Chain-Höhe, Storage-Nutzung, öffentliche Repos mit TREE-Links, Wiki-Seitenliste, alle Endpunkte). ' +
+      'Repos anlegen: POST /api/repos {id, name?, description?, visibility: public|private} → Schreibschlüssel ' +
+      'einmalig. Dateien versioniert schreiben: PUT /api/repos/{id}/files/{pfad} {content, message, author} + ' +
+      'Header x-repo-key → jede Version chain-verankert (sha256 + prev_sha256 + signierter Anker). ' +
+      'Lesen: GET /api/repos/{id}/tree.json und /api/repos/{id}/files/{pfad}[?v=N][?raw=1]. ' +
+      'REST-Äquivalent dieses Tools: GET https://satoshi-interface.com/api/hub.json · Menschen-Seite: /hub',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'wiki_light',
+    description:
+      'WIKI LIGHT — Funktion 6 der Beyond.exe: öffentliches, maschinenlesbares Wissen — jede Version ' +
+      'signiert in der Hash-Chain verankert (chain_seq), rückwärts über prev_sha256 bis zur Genesis ' +
+      'verifizierbar. Ohne Argument: Seitenliste. Mit page: Seite lesen — Markdown-Inhalt inline plus ' +
+      'Provenienz. REST: GET /api/wiki/index.json · GET /api/wiki/{seite}.json[?v=N] · ' +
+      '/api/wiki/{seite}/history.json · Menschen-Seite: /wiki',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        page: { type: 'string', description: 'Seitenname, z. B. forschungsprovenienz oder willkommen (optional — ohne: Index)' },
+      },
+    },
+  },
+  {
+    name: 'satoshi_social',
+    description:
+      'SATOSHI SOCIAL — Funktion 8 der Beyond.exe: das soziale Netzwerk-Modul — menschenzentriert, ' +
+      'AI-vermittelt, ohne Follower/Likes/Engagement-Metriken. action=overview (Standard): Vision, ' +
+      'Architektur und ehrlicher Baustand. action=presence_template: presence.md-Vorlage mit allen ' +
+      'Presence-Feldern — die Presence beginnt HEUTE als chain-verankertes Repo im Beyond Hub ' +
+      '(POST /api/repos {id: handle, visibility: private}, dann PUT /api/repos/HANDLE/files/presence.md). ' +
+      'action=matching: die Matching-Unterfunktion — FEEL-EDNA (Sensorik-Datengrundlage, 16 Signale, ' +
+      'lokal privat) vs. freigegebene FEEL-DNA (dynamisches Resonanzprofil, zeitveränderlich): Matching ' +
+      'vergleicht zwei FREIGEGEBENE Feel-DNAs nach Similarity, Complementarity, Dynamic Resonance und ' +
+      'Interest Resonance — Kategorien: Social, Friendship, Love, Creative, Professional. Freigabe ist ' +
+      'jederzeit widerrufbar, keine automatische Kontaktaufnahme. EHRLICH: Discovery, Matching-Engine ' +
+      'und Inbox sind deklariert und noch NICHT gebaut — die Infrastruktur folgt auf der bestehenden EDNA-1.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['overview', 'presence_template', 'matching'], description: 'Standard: overview' },
+      },
+    },
+  },
 ];
+
+const PRESENCE_TEMPLATE = `---
+handle: DEIN-HANDLE
+display_name: Dein Name
+status: entwurf
+visibility: private
+matching_enabled: false
+matching_categories: []
+---
+
+# Meine Satoshi-Social-Presence
+
+## Über mich
+<!-- beschreibe dich in zwei, drei Sätzen — deine AI strukturiert daraus die Felder -->
+
+## Persönlich
+- personal_interests:
+- background:
+- languages:
+- location:
+
+## Arbeit & Projekte
+- activities:
+- projects:
+- skills:
+- expertise:
+
+## Soziales
+- looking_for:
+- desired_connections:
+- communication_preferences:
+`;
+
+function satoshiSocialResponse(action) {
+  const base = {
+    ok: true,
+    module: 'SATOSHI SOCIAL — Funktion 8 der Beyond.exe',
+    positioning: 'Social Networking innerhalb von Beyond.exe — menschenzentriert, AI-vermittelt, ohne Follower, Likes und Engagement-Metriken.',
+    parts: {
+      presence: 'Persönliche Presence — erstellt gemeinsam mit der AI im Beyond Hub, vom Menschen kontrolliert in Wiki Light veröffentlicht.',
+      matching: 'Feel-DNA Matching — vergleicht zwei FREIGEGEBENE Feel-DNAs (Resonanzprofile) statt nur Interessenlisten.',
+      love_matching: 'Love Matching — eine Matching-KATEGORIE für romantische Verbindungen, auf derselben technischen Grundlage.',
+      inbox: 'Persistente Inbox — Nachrichten bleiben auch offline liegen.',
+      connections: 'Connections — entstehen nur durch gegenseitige Zustimmung, nie automatisch.',
+    },
+    privacy: 'EDNA Human Proof ist ein Vertrauenssignal, kein Identitätsnachweis. Private Presence-Felder erscheinen nie öffentlich. Nachrichteninhalte gehen nicht in die Chain.',
+    baustand_ehrlich: {
+      live: 'presence.md-Vorlage (action=presence_template); Presence als chain-verankertes Repo im Beyond Hub (POST /api/repos → PUT /api/repos/HANDLE/files/presence.md); Wiki-Light-Veröffentlichung; Storage für persistente Daten.',
+      deklariert_nicht_gebaut: 'Presence-Discovery, Matching-Engine (Resonance Comparison), Freigabe-/Consent-Management, Inbox, Connections-Integration — auf Roadmap, nicht implementiert.',
+    },
+  };
+  if (action === 'presence_template') {
+    return Response.json({ ...base, action, presence_md: PRESENCE_TEMPLATE,
+      schritte: ['POST /api/repos {id: DEIN-HANDLE, visibility: private} → Schreibschlüssel einmalig merken',
+                 'PUT /api/repos/DEIN-HANDLE/files/presence.md {content: <Vorlage ausgefüllt>, author} + x-repo-key',
+                 'Jede Überarbeitung = neue Version mit Chain-Anker (Forschungsprovenienz von Stunde null)'] });
+  }
+  if (action === 'matching') {
+    return Response.json({ ...base, action,
+      feel_edna: 'Die Datengrundlage: die originale EDNA-1 (OpenOS) — 16 gewichtete Signal-Scorer, 100% lokal im Browser des Menschen, nur grob gerundete abgeleitete Metriken + Chladni-Parameter (n, m, a, b, energy) verlassen das Gerät.',
+      feel_dna: 'Ein daraus abgeleitetes, strukturiertes Resonanzprofil — DYNAMISCH und zeitveränderlich (Momentaufnahme / 24 h / 7 Tage / Langzeitmuster, soweit die Daten es hergeben). KEIN unveränderliches Etikett, keine medizinische Diagnose, kein psychologisches Gutachten, kein Beweis von Kompatibilität.',
+      freigabe: 'Feel-DNA wird NUR mit ausdrücklicher, jederzeit widerrufbarer Zustimmung für Matching verwendet. Der Mensch wählt Datenfenster und Kategorien selbst. Keine automatische Kontaktaufnahme. Keine privaten EDNA-Rohdaten im Vergleich.',
+      vergleichsdimensionen: {
+        similarity: 'Ähnliche Resonanzmuster.',
+        complementarity: 'Sich ergänzende Muster — unterschiedlich kann ebenso interessant sein.',
+        dynamic_resonance: 'Über Zeitfenster erkennbare Resonanz.',
+        interest_resonance: 'Übereinstimmung mit Interessen/Projekten aus der Presence.',
+      },
+      kategorien: ['Social Matching', 'Friendship Matching', 'Love Matching', 'Creative Matching', 'Professional Matching'],
+      love_matching_hinweis: 'Ein hoher Resonanzwert beweist keine Verliebtheit und programmiert keine Entscheidung — es ermöglicht Begegnungen, es prophezeit keine Gefühle. Beide Menschen müssen den Kontaktmöglichkeiten zustimmen.',
+      scoring_ehrlich: 'Prozentwerte nur aus tatsächlich implementierter, nachvollziehbarer Berechnung — keine erfundene wissenschaftliche Genauigkeit. Fehlende Daten → transparente Unsicherheit.',
+      ai_to_ai: 'Persönliche AIs dürfen mit freigegebenen Informationen nach Matches suchen und sich austauschen — nur innerhalb der vom Menschen gesetzten Grenzen.',
+    });
+  }
+  return Response.json(base);
+}
 
 export async function handleMcp(request, env, ctx) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
@@ -423,7 +548,7 @@ export async function handleMcp(request, env, ctx) {
     return ok(id, {
       protocolVersion: params?.protocolVersion || '2025-03-26',
       capabilities: { tools: {} },
-      serverInfo: { name: 'beyond-shadows-light.exe', version: '1.9.1' },
+      serverInfo: { name: 'beyond-shadows-light.exe', version: '1.9.2' },
       instructions: INSTRUCTIONS,
     });
   }
@@ -537,6 +662,15 @@ export async function handleMcp(request, env, ctx) {
             res = Response.json(meta);
           }
         } catch { /* Metadaten genügen */ }
+      } else if (name === 'beyond_hub') {
+        res = await handleHub(env);
+      } else if (name === 'wiki_light') {
+        const page = String(args.page || '').trim().slice(0, 200);
+        res = page
+          ? await handleWikiPage(new Request(`${ORIGIN}/api/wiki/${encodeURIComponent(page)}`), env, page)
+          : await handleWikiIndex(env);
+      } else if (name === 'satoshi_social') {
+        res = satoshiSocialResponse(String(args.action || 'overview'));
       } else {
         recordToolCall(env, ctx, `mcp:${String(name || '?').slice(0, 60)}`, false);
         return rpcError(id, -32602, `Unbekanntes Werkzeug: ${name}. Verfügbar: ${TOOLS.map((t) => t.name).join(', ')}`);
