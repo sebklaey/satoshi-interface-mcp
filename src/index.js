@@ -14,6 +14,7 @@ import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handleIpfsGateway } from './ipfs.js';
 import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm } from './storage.js';
 import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
+import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
 
 const BOT_RULES = [
   // AI-Crawler zuerst (spezifisch vor generisch)
@@ -566,6 +567,20 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
         return handleWikiWrite(request, env, decodeURIComponent(wikiPage[1]).replace(/\.json$/i, ''));
       }
       return handleWikiPage(request, env, decodeURIComponent(wikiPage[1]));
+    }
+    // SATOSHI SOCIAL — MATCHING CONSENT: Feel-DNA-Freigabe mit Widerruf.
+    // Autorisation = Schreibschluessel des Presence-Repos; Chain-Anker datenschonend.
+    if (url.pathname === '/api/matching/consent') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'POST') return handleConsentGrant(request, env);
+      return handleConsentStatus(request, env);
+    }
+    if (url.pathname === '/api/matching/consent/revoke') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleConsentRevoke(request, env);
+    }
+    if (url.pathname === '/api/matching/consents.json') {
+      return handleConsentList(env);
     }
     // EDNA-1 Human Proof als offener Dienst — für externe Systeme OHNE AI
     if (url.pathname === '/api/edna/verify') {

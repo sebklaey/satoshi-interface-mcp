@@ -14,6 +14,7 @@ import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop
 import { handleAgentRegister, handleAgentsList, handleMessageSend, handleInbox, handleMessageReply, handleMessageAck } from './dispatcher.js';
 import { handleStorageUpload, handleStorageDownload } from './storage.js';
 import { handleHub, handleWikiIndex, handleWikiPage } from './repos.js';
+import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -445,6 +446,33 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'matching_consent',
+    description:
+      'SATOSHI SOCIAL — MATCHING CONSENT (live): Feel-DNA-Freigabe mit Widerruf — die erste echte ' +
+      'Matching-Komponente. Die Freigabe wird mit dem PRESENCE-REPO verknuepft: Autorisation ist der ' +
+      'Schreibschluessel des Repos (x-repo-key / api_key), kein neues Login. action=grant: Freigabe ' +
+      'erteilen/aktualisieren {handle, categories? [social|friendship|love|creative|professional], ' +
+      'timeframes? [moment|24h|7d|longterm], feel?} — jede Änderung erzeugt einen datenschonenden, ' +
+      'signierten Chain-Anker (nur Handle + Ereignis + SHA-256 der Scopes + Zaehler — NIE Scope-Inhalt, ' +
+      'NIE der FEEL-Schluessel). action=status: oeffentlich nur aktiv/inaktiv + Kategorie-Anzahl; mit ' +
+      'api_key volle Details. action=revoke: sofortiger Widerruf (eigenes Chain-Ereignis; der Handle ' +
+      'faellt aus der oeffentlichen Liste). action=list: alle AKTIVEN Freigaben (nur Handle + Anzahl — ' +
+      'Eingang der spaeteren Matching-Engine). REST: POST/GET /api/matching/consent, ' +
+      'POST /api/matching/consent/revoke, GET /api/matching/consents.json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['grant', 'status', 'revoke', 'list'], description: 'Standard: status' },
+        handle: { type: 'string', description: 'Presence-Handle (= Repo-ID im Beyond Hub)' },
+        api_key: { type: 'string', description: 'Schreibschluessel des Presence-Repos (bei grant/revoke/status-Detail)' },
+        categories: { type: 'array', items: { type: 'string' }, description: 'social|friendship|love|creative|professional' },
+        timeframes: { type: 'array', items: { type: 'string' }, description: 'moment|24h|7d|longterm' },
+        feel: { type: 'string', description: 'Optional: FEEL-Schluessel (FEEL-XXXXXX) — verknuepft, nie in der Chain' },
+      },
+      required: ['handle'],
+    },
+  },
 ];
 
 const PRESENCE_TEMPLATE = `---
@@ -494,7 +522,7 @@ function satoshiSocialResponse(action) {
     privacy: 'EDNA Human Proof ist ein Vertrauenssignal, kein Identitätsnachweis. Private Presence-Felder erscheinen nie öffentlich. Nachrichteninhalte gehen nicht in die Chain.',
     baustand_ehrlich: {
       live: 'presence.md-Vorlage (action=presence_template); Presence als chain-verankertes Repo im Beyond Hub (POST /api/repos → PUT /api/repos/HANDLE/files/presence.md); Wiki-Light-Veröffentlichung; Storage für persistente Daten.',
-      deklariert_nicht_gebaut: 'Presence-Discovery, Matching-Engine (Resonance Comparison), Freigabe-/Consent-Management, Inbox, Connections-Integration — auf Roadmap, nicht implementiert.',
+      deklariert_nicht_gebaut: 'Presence-Discovery, die Matching-Engine (Resonance Comparison) und die Inbox sind auf der Roadmap — CONSENT-MANAGEMENT IST LIVE (tools/call "matching_consent").',
     },
   };
   if (action === 'presence_template') {
@@ -548,7 +576,7 @@ export async function handleMcp(request, env, ctx) {
     return ok(id, {
       protocolVersion: params?.protocolVersion || '2025-03-26',
       capabilities: { tools: {} },
-      serverInfo: { name: 'beyond-shadows-light.exe', version: '1.9.2' },
+      serverInfo: { name: 'beyond-shadows-light.exe', version: '1.9.3' },
       instructions: INSTRUCTIONS,
     });
   }
@@ -671,6 +699,24 @@ export async function handleMcp(request, env, ctx) {
           : await handleWikiIndex(env);
       } else if (name === 'satoshi_social') {
         res = satoshiSocialResponse(String(args.action || 'overview'));
+      } else if (name === 'matching_consent') {
+        const action = String(args.action || 'status');
+        const mk = (path) => new Request(`${ORIGIN}${path}`, {
+          method: action === 'status' || action === 'list' ? 'GET' : 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(args.api_key ? { 'x-repo-key': String(args.api_key) } : {}),
+          },
+          ...(action === 'status' || action === 'list' ? {} : {
+            body: JSON.stringify({ handle: args.handle, categories: args.categories, timeframes: args.timeframes, feel: args.feel }),
+          }),
+        });
+        if (action === 'list') res = await handleConsentList(env);
+        else if (action === 'revoke') res = await handleConsentRevoke(mk('/api/matching/consent/revoke'), env);
+        else if (action === 'grant') res = await handleConsentGrant(mk('/api/matching/consent'), env);
+        else res = await handleConsentStatus(new Request(`${ORIGIN}/api/matching/consent?handle=${encodeURIComponent(String(args.handle || ''))}`, {
+          headers: args.api_key ? { 'x-repo-key': String(args.api_key) } : {},
+        }), env);
       } else {
         recordToolCall(env, ctx, `mcp:${String(name || '?').slice(0, 60)}`, false);
         return rpcError(id, -32602, `Unbekanntes Werkzeug: ${name}. Verfügbar: ${TOOLS.map((t) => t.name).join(', ')}`);
