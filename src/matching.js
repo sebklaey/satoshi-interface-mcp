@@ -50,7 +50,7 @@ function ensureMatchingTable(env) {
   return migrated;
 }
 
-async function sha256hexStr(str) {
+export async function sha256hexStr(str) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }

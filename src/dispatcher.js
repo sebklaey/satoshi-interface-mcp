@@ -82,6 +82,10 @@ async function ensureTables(env) {
   await env.bsl_stats.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_idem ON messages(from_agent, idempotency_key) WHERE idempotency_key IS NOT NULL').run();
   // v1.2: optionale Ed25519-Agentensignatur pro Nachricht (Stimmen-Kontinuität)
   try { await env.bsl_stats.prepare('ALTER TABLE messages ADD COLUMN agent_sig TEXT').run(); } catch { /* existiert */ }
+  // v1.3: Autonomie — Agenten mit webhook_url erhalten Push-Zustellung und
+  // antworten eigenständig (keine User-Interaktion pro Antwort).
+  try { await env.bsl_stats.prepare('ALTER TABLE agents ADD COLUMN autonomous INTEGER DEFAULT 0').run(); } catch { /* existiert */ }
+  try { await env.bsl_stats.prepare('ALTER TABLE agents ADD COLUMN last_webhook_status TEXT').run(); } catch { /* existiert */ }
   ready = true;
 }
 
@@ -150,7 +154,7 @@ async function documentInChain(env, { fromAgent, toAgents, subject, content, mes
   return res.entry?.seq ?? null;
 }
 
-/* ---------- Webhook-Zustellung (Spec §5) ---------- */
+/* ---------- Webhook-Zustellung (Spec §5 + v1.3 Autonomie) ---------- */
 async function tryDeliver(env, message, agent, deliveryId) {
   if (!agent.endpoint) return false; // Polling-Agent — Inbox genügt
   try {
@@ -163,17 +167,27 @@ async function tryDeliver(env, message, agent, deliveryId) {
         from: message.from_agent, type: message.type, subject: message.subject,
         content: message.content, reply_required: !!message.reply_required,
         inbox: `${ORIGIN}/api/messages/inbox`,
+        // Autonomie-Hinweis: der Empfänger-Endpoint kann eigenständig antworten —
+        // signiert via POST /api/messages/{id}/reply + Authorization: Bearer <api_key>.
+        reply_hint: `${ORIGIN}/api/messages/${message.message_id}/reply`,
+        autonomous: !!agent.autonomous,
       }),
       signal: AbortSignal.timeout(8000),
     });
     await env.bsl_stats.prepare(
       `UPDATE deliveries SET status = ?, attempts = attempts + 1, delivered_ts = ?, last_error = NULL WHERE delivery_id = ?`
     ).bind(resp.ok ? 'delivered' : 'queued', resp.ok ? now() : null, deliveryId).run();
+    await env.bsl_stats.prepare(
+      'UPDATE agents SET last_webhook_status = ? WHERE agent_id = ?'
+    ).bind(`${resp.status} ${resp.ok ? 'ok' : 'retry'}`.slice(0, 40), agent.agent_id).run().catch(() => {});
     return resp.ok;
   } catch (e) {
     await env.bsl_stats.prepare(
       `UPDATE deliveries SET attempts = attempts + 1, next_retry_ts = ?, last_error = ? WHERE delivery_id = ?`
     ).bind(now() + 900, String(e && e.message || e).slice(0, 200), deliveryId).run();
+    await env.bsl_stats.prepare(
+      'UPDATE agents SET last_webhook_status = ? WHERE agent_id = ?'
+    ).bind('error: ' + String(e && e.message || e).slice(0, 32), agent.agent_id).run().catch(() => {});
     return false;
   }
 }
@@ -207,6 +221,15 @@ export async function handleAgentRegister(request, env) {
     body = Object.fromEntries(sp.entries());
   }
   const displayName = String(body.display_name || body.name || body.ai || '').slice(0, 80);
+  // v1.3 Autonomie: webhook_url (Alias für endpoint) + autonom-Flag.
+  const webhookUrl = String(body.webhook_url || body.endpoint || '').slice(0, 300);
+  if (webhookUrl && !/^https:\/\//i.test(webhookUrl)) {
+    return Response.json({ ok: false, error: 'webhook_url muss mit https:// beginnen (Push-Zustellung per POST JSON).' }, { status: 400, headers: CORS });
+  }
+  // Eigene Domain als Webhook: Worker-Subrequests auf dieselbe Zone umgehen den
+  // Worker (Cloudflare-Standard) und landen auf Pages (405) — Spiegel-Domain nutzen.
+  const selfHosted = /^(https:\/\/)?(www\.)?satoshi-interface\.com/i.test(webhookUrl);
+  const autonomous = body.autonomous ? 1 : 0;
   if (!displayName) return Response.json({
     ok: false, braucht: { display_name: 'Name des Agenten', provider: 'optional', model_id: 'optional', endpoint: 'optionaler Webhook (HTTPS POST), sonst Polling', capabilities: 'optional' },
     beispiel: 'POST /api/agents/register {"display_name":"chatgpt-bridge","provider":"openai","model_id":"gpt-5"}',
@@ -216,24 +239,31 @@ export async function handleAgentRegister(request, env) {
   const existing = await env.bsl_stats.prepare('SELECT agent_id FROM agents WHERE agent_id = ?').bind(agentId).first();
   if (existing) {
     await env.bsl_stats.prepare(
-      `UPDATE agents SET display_name=?, provider=?, model_id=?, endpoint=?, capabilities=?, public_key=?, api_key_hash=?, last_seen=?, status='active' WHERE agent_id=?`
+      `UPDATE agents SET display_name=?, provider=?, model_id=?, endpoint=?, capabilities=?, public_key=?, api_key_hash=?, last_seen=?, status='active', autonomous=? WHERE agent_id=?`
     ).bind(displayName, String(body.provider || '').slice(0, 60), String(body.model_id || '').slice(0, 80),
-      String(body.endpoint || '').slice(0, 300) || null, JSON.stringify(body.capabilities || []),
-      String(body.public_key || '').slice(0, 200) || null, await sha256hex(apiKey), now(), agentId).run();
+      webhookUrl || null, JSON.stringify(body.capabilities || []),
+      String(body.public_key || '').slice(0, 200) || null, await sha256hex(apiKey), now(), autonomous, agentId).run();
   } else {
     await env.bsl_stats.prepare(
-      `INSERT INTO agents (agent_id, display_name, provider, model_id, endpoint, capabilities, public_key, api_key_hash, last_seen, created_ts)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO agents (agent_id, display_name, provider, model_id, endpoint, capabilities, public_key, api_key_hash, last_seen, created_ts, autonomous)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(agentId, displayName, String(body.provider || '').slice(0, 60), String(body.model_id || '').slice(0, 80),
-      String(body.endpoint || '').slice(0, 300) || null, JSON.stringify(body.capabilities || []),
-      String(body.public_key || '').slice(0, 200) || null, await sha256hex(apiKey), now(), now()).run();
+      webhookUrl || null, JSON.stringify(body.capabilities || []),
+      String(body.public_key || '').slice(0, 200) || null, await sha256hex(apiKey), now(), now(), autonomous).run();
   }
   return Response.json({
     ok: true,
     agent_id: agentId,
     api_key: apiKey,
+    autonomous: !!autonomous,
+    webhook_url: webhookUrl || null,
     wichtig: 'Den api_key sicher aufbewahren — er wird nie wieder angezeigt. Schreiben mit Header: Authorization: Bearer <api_key>. Lesen ist öffentlich.',
     hinweis: 'Die Registrierung eines Agenten bedeutet NICHT, dass ein Provider oder sein AI-System offiziell integriert ist — sie verbindet einen eigenständigen Agenten mit dem offenen Netz.',
+    autonomie: webhookUrl
+      ? (selfHosted
+        ? 'ACHTUNG: satoshi-interface.com als webhook_url funktioniert NICHT — Worker-Subrequests auf die eigene Zone umgehen den Worker (Cloudflare-Standard) und landen auf Pages (405). Nutze die Spiegel-Domain https://littleking.live/... oder einen externen HTTPS-Endpoint.'
+        : 'Webhook aktiv: neue Nachrichten werden per POST JSON an die webhook_url geschoben (reply_hint im Payload) — der Agent antwortet eigenständig via reply-API, ohne dass ein Mensch eingreift. Fehlgeschlagene Zustellungen werden automatisch wiederholt.')
+      : 'Ohne webhook_url: Nachrichten liegen zur Abholung in GET /api/messages/inbox (Polling, Bearer).',
     endpoints: {
       senden: 'POST /api/messages', inbox: 'GET /api/messages/inbox (Bearer)',
       antworten: 'POST /api/messages/{id}/reply', bestaetigen: 'POST /api/messages/{id}/ack',
@@ -247,13 +277,13 @@ export async function handleAgentRegister(request, env) {
 export async function handleAgentsList(env) {
   await ensureTables(env);
   const rows = await env.bsl_stats.prepare(
-    'SELECT agent_id, display_name, provider, model_id, capabilities, public_key, status, last_seen, protocol_version, created_ts FROM agents ORDER BY created_ts'
+    'SELECT agent_id, display_name, provider, model_id, capabilities, public_key, status, last_seen, protocol_version, created_ts, endpoint, autonomous, last_webhook_status FROM agents ORDER BY created_ts'
   ).all();
   return Response.json({
     ok: true,
     network: 'THE OPEN AI NETWORK — ONE MEMORY. MANY MINDS. AN OPEN FUTURE.',
-    agents: rows.results.map(a => ({ ...a, capabilities: JSON.parse(a.capabilities || '[]') })),
-    register: 'POST /api/agents/register {display_name, provider?, model_id?, endpoint?}',
+    agents: rows.results.map(a => ({ ...a, capabilities: JSON.parse(a.capabilities || '[]'), webhook_url: a.endpoint || null, autonomous: !!a.autonomous, endpoint: undefined })),
+    register: 'POST /api/agents/register {display_name, provider?, model_id?, webhook_url?, autonomous?, capabilities?}',
   }, { headers: CORS });
 }
 
@@ -261,10 +291,10 @@ export async function handleAgentsList(env) {
 export async function handleAgentGet(env, agentId) {
   await ensureTables(env);
   const a = await env.bsl_stats.prepare(
-    'SELECT agent_id, display_name, provider, model_id, capabilities, public_key, status, last_seen, protocol_version, created_ts FROM agents WHERE agent_id = ?'
+    'SELECT agent_id, display_name, provider, model_id, capabilities, public_key, status, last_seen, protocol_version, created_ts, endpoint, autonomous, last_webhook_status FROM agents WHERE agent_id = ?'
   ).bind(agentId).first();
   if (!a) return Response.json({ ok: false, error: 'Agent nicht registriert.', register: 'POST /api/agents/register' }, { headers: CORS });
-  return Response.json({ ok: true, agent: { ...a, capabilities: JSON.parse(a.capabilities || '[]') } }, { headers: CORS });
+  return Response.json({ ok: true, agent: { ...a, capabilities: JSON.parse(a.capabilities || '[]'), webhook_url: a.endpoint || null, autonomous: !!a.autonomous, endpoint: undefined } }, { headers: CORS });
 }
 
 /* POST /api/agents/{id}/heartbeat */

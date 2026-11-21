@@ -15,6 +15,7 @@ import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handle
 import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm } from './storage.js';
 import { handleHub, handleReposList, handleRepoCreate, handleRepoGet, handleFileWrite, handleFileRead, handleFileHistory, handleWikiIndex, handleWikiPage, handleWikiHistory, handleWikiWrite } from './repos.js';
 import { handleConsentGrant, handleConsentRevoke, handleConsentStatus, handleConsentList } from './matching.js';
+import { handleDnaPut, handleDnaGet, handleDiscover, handleMatch, handleContact, handleInboxGet, handleContactResolve, handleConnections, handleWebhookLog, handleWebhookLogGet } from './social.js';
 import { handleBranchList, handleBranchCreate, handleBranchGet, handleBranchDelete, handleCommitCreate, handleCommitList2, handleCommitGet, handleCommitRaw, handlePullList, handlePullCreate, handlePullGet, handlePullPatch, handlePullReview, handlePullComment, handlePullMerge, handleCompare } from './collab.js';
 import { withSec, rateLimit, pseudoUa, cleanReferer } from './security.js';
 
@@ -339,6 +340,7 @@ async function routeInner(request, env, ctx) {
       else if (p === '/api/messages' && m === 'POST') { bucket = 'msg'; limit = 15; }
       else if (p === '/api/agents/register' && m === 'POST') { bucket = 'register'; limit = 5; win = 600; }
       else if (p === '/api/edna/verify' && m === 'POST') { bucket = 'edna'; limit = 60; }
+      else if ((p.startsWith('/api/matching/') && m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS') || p === '/api/webhook-log') { bucket = 'social'; limit = 30; }
       else if (p === '/mcp' && m === 'POST') { bucket = 'mcp'; limit = 90; }
       if (bucket) {
         const rl = await rateLimit(request, env, bucket, limit, win);
@@ -713,6 +715,47 @@ h1{color:#c9a962}pre{background:#1d1a16;border:1px solid #4a4136;padding:16px;wh
     }
     if (url.pathname === '/api/edna/proof') {
       return handleEdnaProof(request, env);
+    }
+
+    // SATOSHI SOCIAL — FEEL-DNA + MATCHING ENGINE: Resonance-Matching, Kontakt, Inbox.
+    // Autorisation = Schreibschluessel des Presence-Repos; consent-basiert, widerrufbar.
+    if (url.pathname === '/api/matching/dna') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      if (request.method === 'PUT' || request.method === 'POST') return handleDnaPut(request, env);
+      if (request.method === 'GET') return handleDnaGet(request, env, url.searchParams.get('handle'));
+      return Response.json({ error: 'PUT/POST publiziert · GET nutzt /api/matching/dna/{handle} oder ?handle=' }, { status: 405, headers: CORS });
+    }
+    const dnaHandle = url.pathname.match(/^\/api\/matching\/dna\/([a-z0-9-]{3,60})\/?$/);
+    if (dnaHandle) return handleDnaGet(request, env, dnaHandle[1]);
+    if (url.pathname === '/api/matching/discover.json' || url.pathname === '/api/matching/discover') {
+      return handleDiscover(env, url.searchParams.get('category') || 'social');
+    }
+    if (url.pathname === '/api/matching/match' && request.method === 'POST') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleMatch(request, env);
+    }
+    if (url.pathname === '/api/matching/contact' && request.method === 'POST') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+      return handleContact(request, env);
+    }
+    const inboxHandle = url.pathname.match(/^\/api\/matching\/inbox(?:\/([a-z0-9-]{3,60}))?\/?$/);
+    if (inboxHandle) return handleInboxGet(request, env, inboxHandle[1] || url.searchParams.get('handle'));
+    if (url.pathname === '/api/matching/contact/resolve' && request.method === 'POST') {
+      return handleContactResolve(request, env);
+    }
+    const connHandle = url.pathname.match(/^\/api\/matching\/connections(?:\/([a-z0-9-]{3,60}))?\/?$/);
+    if (connHandle) return handleConnections(request, env, connHandle[1] || url.searchParams.get('handle'));
+    // Webhook-Demo-Empfaenger (Autonomie-E2E): Events landen hier und sind oeffentlich lesbar.
+    if (url.pathname === '/api/webhook-log' && request.method === 'POST') return handleWebhookLog(request, env);
+    if (url.pathname === '/api/webhook-log') return handleWebhookLogGet(env);
+    // Diagnose: exakt derselbe Subrequest wie tryDeliver (Dispatcher → eigene Domain)
+    if (url.pathname === '/api/webhook-selftest') {
+      const r = await fetch('https://satoshi-interface.com/api/webhook-log', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selftest: true, ts: Date.now() }),
+        signal: AbortSignal.timeout(8000),
+      });
+      return Response.json({ ok: true, status: r.status, body: (await r.text()).slice(0, 200) }, { headers: CORS });
     }
 
     // Loggen (nicht-blockierend), dann an Pages durchreichen
