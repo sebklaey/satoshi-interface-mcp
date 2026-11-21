@@ -10,7 +10,7 @@ import { handleMcp } from './mcp.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleAgentGet, handleHeartbeat, handleMessageSend, handleInbox, handleMessageGet, handleMessageAck, handleMessageReply, handleConversation, retryDeliveries, handleAgentKey } from './dispatcher.js';
 import { handleSensoricGet, ensureSensoricTable, handleEdnaVerify, handleEdnaProof } from './sensoric.js';
-import { handleStats, handleRecent } from './stats-api.js';
+import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { handleIpfsDoc, pinBackfill, handleUnpinned, handlePinnedConfirm, handleIpfsGateway } from './ipfs.js';
 import { handleStorageUpload, handleStorageDownload, handleStorageList, handleStorageUnpinned, handleStoragePinnedConfirm } from './storage.js';
 
@@ -261,6 +261,25 @@ export default {
 };
 
 async function route(request, env, ctx) {
+    const res = await routeInner(request, env, ctx);
+    // ECHTE API-Calls aufzeichnen (Methode + normalisierter Pfad + Erfolg) —
+    // getrennt vom Seiten-Tracking: hier zaehlt die Ausfuehrung, nicht der Zugriff.
+    try {
+      const p = new URL(request.url).pathname;
+      if (/^\/(api\/|w$|e\/|loop$|p$|vp$|ipfs\/)/.test(p) && p !== '/api/ping') {
+        const norm = p
+          .replace(/[0-9a-f]{8}-[0-9a-f-]{27,36}/g, '{id}')
+          .replace(/^\/e\/.*$/, '/e/:write')
+          .replace(/^\/ipfs\/.*$/, '/ipfs/{cid}')
+          .replace(/^\/api\/storage\/download\/[^/]+.*$/, '/api/storage/download/{cid}')
+          .slice(0, 80);
+        recordToolCall(env, ctx, `api:${request.method} ${norm}`, res.status < 400);
+      }
+    } catch { /* nie stören */ }
+    return res;
+}
+
+async function routeInner(request, env, ctx) {
     const url = new URL(request.url);
 
     // openos.space → satoshi-interface.com (Main-URL bleibt satoshi-interface.com)
@@ -316,7 +335,7 @@ async function route(request, env, ctx) {
       return handleWriteHelp(request);
     }
     if (url.pathname === '/mcp') {
-      return handleMcp(request, env);
+      return handleMcp(request, env, ctx);
     }
     /* THE TEMPORAL LOOP — öffentlich, autonom, ohne MCP:
        dieselbe Logik wie das MCP-Werkzeug temporal_loop.

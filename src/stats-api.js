@@ -112,6 +112,33 @@ export async function handleRecent(request, env) {
   }
 }
 
+/* ECHTE Tool-Call-Erfassung (seit 2026-11-21): Nicht bloss HTTP-Zugriffe,
+   sondern welche Werkzeuge/Endpunkte mit welcher Methode wirklich aufgerufen
+   wurden — und ob erfolgreich. kind: 'mcp' (Tool-Name) | 'api' (Methode+Pfad). */
+let toolTableReady = null;
+export function recordToolCall(env, ctx, key, ok) {
+  const run = async () => {
+    if (!toolTableReady) {
+      toolTableReady = env.bsl_stats.prepare(
+        `CREATE TABLE IF NOT EXISTS agg_tool_calls (
+           key TEXT PRIMARY KEY, kind TEXT NOT NULL,
+           n INTEGER NOT NULL DEFAULT 0, ok_n INTEGER NOT NULL DEFAULT 0,
+           err_n INTEGER NOT NULL DEFAULT 0, last INTEGER)`).run().catch(() => {});
+    }
+    await toolTableReady;
+    await env.bsl_stats.prepare(
+      `INSERT INTO agg_tool_calls (key, kind, n, ok_n, err_n, last) VALUES (?, ?, 1, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET n = n + 1, ok_n = ok_n + ?, err_n = err_n + ?, last = excluded.last`)
+      .bind(key.slice(0, 120), key.startsWith('mcp:') ? 'mcp' : 'api',
+            ok ? 1 : 0, ok ? 0 : 1, Math.floor(Date.now() / 1000),
+            ok ? 1 : 0, ok ? 0 : 1)
+      .run();
+  };
+  const p = run().catch(() => {});
+  if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+  return p;
+}
+
 export async function handleStats(request, env, ctx) {
   // Edge-Cache 30 s: die /stats-Seite pollt alle 30 s — ohne Cache würde jeder
   // Poll D1 lesen. Mit Cache: ~1 D1-Zugriff pro Minute pro Edge-Standort.
@@ -125,7 +152,7 @@ export async function handleStats(request, env, ctx) {
     const now = Math.floor(Date.now() / 1000);
     const dayAgo = now - 86400;
     const db = env.bsl_stats;
-    const [bots, cats24, recent, counters, mentions, referrers, hourly, liveNow, liveReading, chainWrites, liveProof, ednaAll] = await Promise.all([
+    const [bots, cats24, recent, counters, mentions, referrers, hourly, liveNow, liveReading, chainWrites, liveProof, ednaAll, mcpTools, apiCalls] = await Promise.all([
       db.prepare(`SELECT bot, category, n, last FROM agg_bots ORDER BY n DESC LIMIT 30`).all(),
       db.prepare(`SELECT category, SUM(n) n FROM agg_cats_hourly WHERE h > ? GROUP BY category`)
         .bind(Math.floor(dayAgo / 3600) * 3600).all(),
@@ -159,6 +186,11 @@ export async function handleStats(request, env, ctx) {
       // ALL-TIME: EDNA-verifizierte Menschen (einmal pro Session registriert)
       db.prepare(`SELECT COUNT(*) n, MIN(first_ts) since FROM edna_humans`).first()
         .catch(() => ({ n: 0, since: null })),
+      // ECHTE Tool-Calls (MCP nach Tool-Name, API nach Methode+Pfad) — seit 2026-11-21
+      db.prepare(`SELECT key, n, ok_n, err_n, last FROM agg_tool_calls WHERE kind = 'mcp' ORDER BY n DESC LIMIT 30`).all()
+        .catch(() => ({ results: [] })),
+      db.prepare(`SELECT key, n, ok_n, err_n, last FROM agg_tool_calls WHERE kind = 'api' ORDER BY n DESC LIMIT 40`).all()
+        .catch(() => ({ results: [] })),
     ]);
     const cv = Object.fromEntries((counters.results || []).map((r) => [r.key, r.value]));
     // EDNA-1-Klassifikationen der Live-Sessions aggregieren
@@ -197,6 +229,14 @@ export async function handleStats(request, env, ctx) {
       chainWrites: {
         window: '24h',
         recent: chainWrites.results || [],
+      },
+      // ECHTE Tool-Calls — keine blossen HTTP-Zugriffe: welches Werkzeug,
+      // welche Methode, ob erfolgreich. Zaehlung ab 2026-11-21 (ehrlich: nicht retroaktiv).
+      toolCalls: {
+        since: '2026-11-21',
+        note: 'Nachgewiesene Ausfuehrungen (Name + Erfolg), keine Zugriffsschaetzung.',
+        mcp: (mcpTools.results || []).map((r) => ({ tool: r.key.slice(4), n: r.n, ok: r.ok_n, err: r.err_n, last: r.last })),
+        api: (apiCalls.results || []).map((r) => ({ endpoint: r.key.slice(4), n: r.n, ok: r.ok_n, err: r.err_n, last: r.last })),
       },
       allTime: {
         totalRequests: cv.total ?? 0,

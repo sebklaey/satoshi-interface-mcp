@@ -9,7 +9,7 @@
 
 import { handleFutureWriteGet, handleFutureGet, handleForecast } from './future-chain.js';
 import { handleSensoricGet, handleEdnaVerify, handleEdnaProof } from './sensoric.js';
-import { handleStats, handleRecent } from './stats-api.js';
+import { handleStats, handleRecent, recordToolCall } from './stats-api.js';
 import { runTemporalLoop, runVerifyProphecy, runProphesy } from './temporal-loop.js';
 import { handleAgentRegister, handleAgentsList, handleMessageSend, handleInbox, handleMessageReply, handleMessageAck } from './dispatcher.js';
 import { handleStorageUpload, handleStorageDownload } from './storage.js';
@@ -398,10 +398,11 @@ const TOOLS = [
   },
 ];
 
-export async function handleMcp(request, env) {
+export async function handleMcp(request, env, ctx) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
 
   if (request.method === 'GET') {
+    recordToolCall(env, ctx, 'mcp:discovery', true);
     return Response.json({
       name: 'Beyond-Shadows\'-Light.exe — MCP-Server',
       protocol: 'Model Context Protocol (JSON-RPC 2.0 über HTTP POST)',
@@ -418,6 +419,7 @@ export async function handleMcp(request, env) {
   const { id = null, method, params = {} } = msg || {};
 
   if (method === 'initialize') {
+    recordToolCall(env, ctx, 'mcp:initialize', true);
     return ok(id, {
       protocolVersion: params?.protocolVersion || '2025-03-26',
       capabilities: { tools: {} },
@@ -429,7 +431,10 @@ export async function handleMcp(request, env) {
   if (method === 'notifications/initialized' || method === 'initialized') {
     return new Response(null, { status: 202, headers: CORS });
   }
-  if (method === 'tools/list') return ok(id, { tools: TOOLS });
+  if (method === 'tools/list') {
+    recordToolCall(env, ctx, 'mcp:tools/list', true);
+    return ok(id, { tools: TOOLS });
+  }
 
   if (method === 'tools/call') {
     const name = params.name;
@@ -533,14 +538,21 @@ export async function handleMcp(request, env) {
           }
         } catch { /* Metadaten genügen */ }
       } else {
+        recordToolCall(env, ctx, `mcp:${String(name || '?').slice(0, 60)}`, false);
         return rpcError(id, -32602, `Unbekanntes Werkzeug: ${name}. Verfügbar: ${TOOLS.map((t) => t.name).join(', ')}`);
       }
       const text = await res.text();
+      // Erfolg = HTTP ok und fachlich ok (ok:false im Payload zaehlt als Fehler)
+      let success = res.ok;
+      try { const j = JSON.parse(text); if (j && j.ok === false) success = false; } catch { /* kein JSON */ }
+      recordToolCall(env, ctx, `mcp:${String(name || '?').slice(0, 60)}`, success);
       return ok(id, { content: [{ type: 'text', text }] });
     } catch (e) {
+      recordToolCall(env, ctx, `mcp:${String(name || '?').slice(0, 60)}`, false);
       return rpcError(id, -32603, 'Interner Fehler: ' + String(e && e.message || e).slice(0, 200));
     }
   }
 
+  recordToolCall(env, ctx, 'mcp:unknown-method', false);
   return rpcError(id, -32601, `Method not found: ${method}`);
 }
